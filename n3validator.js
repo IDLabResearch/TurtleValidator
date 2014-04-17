@@ -1,8 +1,8 @@
 var N3 = require('n3'), fs = require('fs'), N3Util = N3.Util;
 
 if (!process.argv[2]){
-	console.log('-- RDF N3/NTriples/Turtle file validator --');
-	console.log('node n3validator <path-to-file>');
+	console.log('RDF N3/NTriples/Turtle file validator');
+	console.log('Usage: $ node N3Validator.js <path-to-file>');
 	process.exit(1);
 }
 
