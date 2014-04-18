@@ -1,9 +1,9 @@
 {
-	"name": "N3Validator",
+	"name": “TurtleValidator",
 	"version": "0.1.0",
 	"license": "",
 	"bin": {
-		"genmem": "./bin/N3Validator"
+		"genmem": "./bin/TurtleValidator"
 	},
 	"dependencies": {
 		"n3": "*"
