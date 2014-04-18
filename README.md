@@ -5,5 +5,5 @@ Command line tool for validating Turtle and Ntriples documents on syntax and XSD
 
 Usage:
 
-    npm install
+    npm install turtle-validator
     node TurtleValidator.js <path-to-file>
