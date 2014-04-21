@@ -29,13 +29,13 @@ parser.parse(turtleStream, function (error, triple, prefixes){
 			switch(type) {
 				case 'float':
 				case 'double':
-					if (!value.match(/[-+]?\d*[.]\d+/)){
+					if (!(/[-+]?\d*[.]\d+/.test(value))){
 					   console.log('WARNING: datatype does not validate for value ' + value);
 					   console.log(triple.subject, triple.predicate, triple.object, '.');	
 					}
 					break;
 				case 'int':
-					if (!value.match(/[-+]?\d*/)){
+					if (!(/^\+?(0|[1-9]\d*)$/.test(value))){
 						console.log('WARNING: int does not validate for value ' + value);
 						console.log(triple.subject, triple.predicate, triple.object, '.');
 					}	

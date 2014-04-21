@@ -1,15 +1,29 @@
 {
-	"name": “TurtleValidator",
-	"version": "0.1.0",
-	"license": "",
-	"bin": {
-		"genmem": "./bin/TurtleValidator"
-	},
-	"dependencies": {
-		"n3": "*"
-	},
-	"repository": {
-    		"type": "git",
-    		"url": "https://github.com/mmlab/N3Validator.git"
-  	}
+  "name": "turtle-validator",
+  "version": "0.1.0",
+  "description": "This command line tool validates Turtle documents and does XSD datatype checks",
+  "main": "TurtleValidator.js",
+  "dependencies": {
+    "n3": "~0.2.6"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/mmlab/TurtleValidator.git"
+  },
+  "keywords": [
+    "Turtle",
+    "RDF",
+    "Semantic",
+    "Web"
+  ],
+  "author": "Miel Vander Sande",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/mmlab/TurtleValidator/issues"
+  },
+  "homepage": "https://github.com/mmlab/TurtleValidator"
 }
