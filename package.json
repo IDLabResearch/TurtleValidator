@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "description": "This command line tool validates Turtle documents and does XSD datatype checks",
   "main": "TurtleValidator.js",
-  "bin" : { "ttl" : "./TurtleValidator.js" },
+  "bin": {
+    "ttl": "./TurtleValidator.js"
+  },
   "dependencies": {
     "n3": "~0.2.6"
   },
