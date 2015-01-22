@@ -7,7 +7,7 @@
     "ttl": "./TurtleValidator.js"
   },
   "dependencies": {
-    "n3": "~0.2.6"
+    "n3": "^0.4.0"
   },
   "devDependencies": {},
   "scripts": {
