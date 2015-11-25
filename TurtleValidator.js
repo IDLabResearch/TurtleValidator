@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+/*! @license ©2014 Miel Vander Sande - Multimedia Lab / iMinds / Ghent University */
+/* Command-line utility to validate Turtle files. */
 
 var N3 = require('n3'),
     fs = require('fs'),
@@ -42,7 +44,7 @@ if (process.argv[2] && (process.argv[2] === "-h" || process.argv[2] === "--help"
         validateStream(fs.createReadStream(filename));
       } catch ( e ) {
         console.error(e);
-      } 
+      }
     } else {
       try{
         validateStream(http.get(process.argv[2]));
@@ -55,5 +57,3 @@ if (process.argv[2] && (process.argv[2] === "-h" || process.argv[2] === "--help"
 } else {
   help();
 }
-
-
