@@ -1,13 +1,15 @@
 #!/usr/bin/env node
+
 /*! @license ©2014 Miel Vander Sande - Multimedia Lab / iMinds / Ghent University */
 /* Command-line utility to validate Turtle files. */
 
 var N3 = require('n3'),
-    fs = require('fs'),
-    N3Util = N3.Util,
-    http = require('http'),
-    fs = require('fs'),
-    validate = require('./lib/validator.js');
+  fs = require('fs'),
+  N3Util = N3.Util,
+  http = require('http'),
+  url = require('url'),
+  fs = require('fs'),
+  validate = require('./lib/validator.js');
 
 var help = function () {
   // In all other cases, let's help the user and return some help
@@ -22,38 +24,33 @@ var help = function () {
   console.log('  $ ttl http://triples.demo.thedatatank.com/demo.ttl');
 };
 
-if (process.argv[2] && (process.argv[2] === "-h" || process.argv[2] === "--help") ) {
-  help();
-} else if (process.argv.length === 2) {
-  // Use stdio as an input stream
-  validate(process.stdin, function (feedback) {
-    feedback.errors.forEach(function (error) {
-      console.log(error);
-    });
-    feedback.warnings.forEach(function (warning) {
-      console.log(warning);
-    });
-    console.log("Validator finished with " + feedback.warnings.length + " warnings and " + feedback.errors.length + " errors.");
-  });
-} else if (process.argv.length === 3 ) {
-  // Create a stream from the file, whether it is a local file or a http stream
-  var filename = process.argv[2];
-  fs.exists(filename, function (exists) {
-    if (exists) {
-      try{
-        validateStream(fs.createReadStream(filename));
-      } catch ( e ) {
-        console.error(e);
-      }
-    } else {
-      try{
-        validateStream(http.get(process.argv[2]));
-      } catch ( e ) {
-        console.error(e);
-      }
-    }
-  });
+var args = process.argv.slice(2);
 
-} else {
-  help();
+if (args.length > 1 || (args.length > 0 && (args[0] === "-h" || args[0] === "--help")))
+  return help();
+
+if (args.length === 0) {
+  validate(process.stdin, showValidation);
+} else if (args.length > 0) {
+  // Create a stream from the file, whether it is a local file or a http stream
+  var parsedUrl = url.parse(args[0]);
+  if (parsedUrl.protocol === 'http:')
+    http.get(parsedUrl.href, function (res) {
+      validate(res, showValidation);
+    }).on('error', function (e) {
+      console.log("Got error: " + e.message);
+    });
+  else
+    validate(fs.createReadStream(parsedUrl.href), showValidation);
+}
+
+// Use stdio as an input stream
+function showValidation(feedback) {
+  feedback.errors.forEach(function (error) {
+    console.log(error);
+  });
+  feedback.warnings.forEach(function (warning) {
+    console.log(warning);
+  });
+  console.log("Validator finished with " + feedback.warnings.length + " warnings and " + feedback.errors.length + " errors.");
 }
