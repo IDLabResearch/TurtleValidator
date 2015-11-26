@@ -6,7 +6,7 @@
 var N3 = require('n3'),
   fs = require('fs'),
   N3Util = N3.Util,
-  http = require('http'),
+  http = require('http');
   url = require('url'),
   fs = require('fs'),
   validate = require('./lib/validator.js');
@@ -34,14 +34,22 @@ if (args.length === 0) {
 } else if (args.length > 0) {
   // Create a stream from the file, whether it is a local file or a http stream
   var parsedUrl = url.parse(args[0]);
-  if (parsedUrl.protocol === 'http:')
+  switch (parsedUrl.protocol) {
+  case 'https:':
+    http = require('https');
+  case 'http:':
     http.get(parsedUrl.href, function (res) {
       validate(res, showValidation);
     }).on('error', function (e) {
       console.log("Got error: " + e.message);
     });
-  else
+    break;
+  case null:
     validate(fs.createReadStream(parsedUrl.href), showValidation);
+    break;
+  default:
+    console.log('Cannot access %s: "%s" not supported', parsedUrl.href, parsedUrl.protocol)
+  }
 }
 
 // Use stdio as an input stream
