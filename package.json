@@ -1,6 +1,6 @@
 {
   "name": "turtle-validator",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "This command line tool validates Turtle documents and does XSD datatype checks",
   "main": "TurtleValidator.js",
   "bin": {
