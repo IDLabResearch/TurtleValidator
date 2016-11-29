@@ -5,15 +5,15 @@ $("#btn_validate").click( function () {
   
   validate($("#ta_turtle").val(), function (feedback) {
     $.each(feedback.warnings, function (index, warning) {
-      $("#warnings").append('<p id="warning' + index + '">' + warning + '<br/>');
+      $("#warnings").append($('<li id="warning' + index + '">').text(warning));
     });
     
     $.each(feedback.errors, function (index, error) {
-      $("#errors").append('<p id="error' + index + '">' + error + '<br/>');
+      $("#errors").append($('<li id="error' + index + '">').text(error));
     });
 
     if (feedback.errors.length === 0 && feedback.warnings.length === 0) {
-      $("#results").append("Congrats! We've validated your output and it contains 0 errors or warnings.");
+      $("#results").append("Congrats! Your syntax is correct.");
     }
   });
 });
