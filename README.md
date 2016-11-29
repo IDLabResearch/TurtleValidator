@@ -2,7 +2,7 @@ TurtleValidator
 ===========
 RDF NTriples/Turtle validator using Ruben Verborgh's [N3 NodeJS library](https://github.com/RubenVerborgh/N3.js). Validate Turtle and Ntriples documents on syntax and XSD datatype errors through command line.
 
-© 2014, 2015 - MMLab - Ghent University - iMinds
+© 2014, 2015 - IDLab - Ghent University - imec
 Source code: https://github.com/MMLab/TurtleValidator
 
 Install:
