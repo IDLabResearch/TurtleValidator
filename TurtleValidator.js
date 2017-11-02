@@ -22,18 +22,23 @@ var help = function () {
   console.log('  $ ttl <path-to-file>');
   console.log('  $ curl http://data.linkeddatafragments.org/dbpedia -H "accept: text/turtle" | ttl');
   console.log('  $ ttl http://triples.demo.thedatatank.com/demo.ttl');
+  console.log('  $ ttl <path-to-file> <path-to-second-file>');
 };
 
 var args = process.argv.slice(2);
 
-if (args.length > 1 || (args.length > 0 && (args[0] === "-h" || args[0] === "--help")))
+if (args.length > 0 && (args[0] === "-h" || args[0] === "--help"))
   return help();
 
 if (args.length === 0) {
   validate(process.stdin, showValidation);
 } else if (args.length > 0) {
+  args.forEach(validateArgument);
+}
+
+function validateArgument(arg) {
   // Create a stream from the file, whether it is a local file or a http stream
-  var parsedUrl = url.parse(args[0]);
+  var parsedUrl = url.parse(arg);
   switch (parsedUrl.protocol) {
   case 'https:':
     http = require('https');
