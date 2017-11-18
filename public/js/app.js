@@ -17,3 +17,5 @@ $("#btn_validate").click( function () {
     }
   });
 });
+
+$(".lined").linedtextarea();
