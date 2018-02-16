@@ -11,7 +11,7 @@ Install:
 
 Examples:
 
-    $ ttl <path-to-file>
+    $ ttl <path-to-file ...>
     $ curl http://data.linkeddatafragments.org/dbpedia -H "accept: text/turtle" | ttl
     $ ttl http://triples.demo.thedatatank.com/demo.ttl
 
