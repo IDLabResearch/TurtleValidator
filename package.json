@@ -1,16 +1,17 @@
 {
   "name": "turtle-validator",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "This command line tool validates Turtle documents and does XSD datatype checks",
-  "main": "TurtleValidator.js",
+  "main": "lib/validator.js",
   "bin": {
     "ttl": "./TurtleValidator.js"
   },
   "dependencies": {
-    "n3": "^0.4.0"
+    "n3": "^0.11.x"
   },
   "devDependencies": {},
   "scripts": {
+    "build": "browserify lib/validator.js -o public/js/ttl.js",	  
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
