@@ -1,11 +1,9 @@
 #!/usr/bin/env node
 
-/*! @license ©2014 Miel Vander Sande - Multimedia Lab / iMinds / Ghent University */
+/*! @license ©2014 Miel Vander Sande - IDLab / imec / Ghent University */
 /* Command-line utility to validate Turtle files. */
 
-var N3 = require('n3'),
-  fs = require('fs'),
-  N3Util = N3.Util,
+var fs = require('fs'),
   http = require('http');
   url = require('url'),
   fs = require('fs'),
@@ -14,7 +12,7 @@ var N3 = require('n3'),
 var help = function () {
   // In all other cases, let's help the user and return some help
   console.log('RDF NTriples/Turtle validator using Ruben Verborgh\'s N3 nodejs library');
-  console.log('© 2014 - MMLab - Ghent University - iMinds');
+  console.log('© 2014 - IDLab - Ghent University - imec');
   console.log('Source code: https://github.com/MMLab/TurtleValidator');
   console.log('');
   console.log('Examples:');
@@ -60,10 +58,10 @@ function validateArgument(arg) {
 // Use stdio as an input stream
 function showValidation(feedback) {
   feedback.errors.forEach(function (error) {
-    console.log(error);
+    console.log('ERROR: ' + error);
   });
   feedback.warnings.forEach(function (warning) {
-    console.log(warning);
+    console.log('WARNING: ' + warning);
   });
   console.log("Validator finished with " + feedback.warnings.length + " warnings and " + feedback.errors.length + " errors.");
 }
