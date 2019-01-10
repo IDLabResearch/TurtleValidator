@@ -1,9 +1,8 @@
-(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
-var N3 = require('n3'),
-    N3Util = N3.Util;
+(function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
+var N3 = require('n3');
 
 var validate =  function (turtleStream, callback) {
-  var parser = N3.Parser();
+  var parser = N3.Parser({ format: 'text/turtle' });
   var errorCount = 0, warningCount = 0;
   var regexp = {
     'dateTime' : /^(-?(?:[1-9][0-9]*)?[0-9]{4})-(1[0-2]|0[1-9])-(3[0-1]|0[1-9]|[1-2][0-9])?T(2[0-3]|[0-1][0-9]):([0-5][0-9]):([0-5][0-9])(\.[0-9]+)??(Z|[+-](?:2[0-3]|[0-1][0-9]):[0-5][0-9])?$/,
@@ -13,20 +12,20 @@ var validate =  function (turtleStream, callback) {
   };
 
   var feedback = { warnings : [], errors : []};
-  
+
   parser.parse(turtleStream, function(error, triple, prefixes) {
     if (error) {
-      feedback.errors.push(error);
+      feedback.errors.push(error.message);
     }
 
     if (triple) {
-      if (N3Util.isLiteral(triple.object)) {
-        var value = N3Util.getLiteralValue(triple.object);
-        var type = N3Util.getLiteralType(triple.object);
+      if (triple.object.termType === 'literal') {
+        var value = triple.object.value;
+        var type = triple.object.datatype;
 
         type = type.replace('http://www.w3.org/2001/XMLSchema#', '');
         if (regexp[type] && !regexp[type].test(value)) {
-          feedback.warnings.push('WARNING: xsd:', type, 'does not validate for literal. {', triple.subject, triple.predicate, triple.object, '}');
+          feedback.warnings.push('xsd:', type, 'does not validate for literal. {', triple.subject.value, triple.predicate.value, triple.object.value, '}');
         }
       }
     } else {
@@ -42,12 +41,8 @@ if (typeof window !== 'undefined') {
 module.exports = validate;
 
 },{"n3":2}],2:[function(require,module,exports){
-// Replace local require by a lazy loader
-var globalRequire = require;
-require = function () {};
-
-// Expose submodules
-var exports = module.exports = {
+module.exports = {
+  DataFactory:  require('./lib/N3DataFactory'),
   Lexer:        require('./lib/N3Lexer'),
   Parser:       require('./lib/N3Parser'),
   Writer:       require('./lib/N3Writer'),
@@ -57,20 +52,389 @@ var exports = module.exports = {
   Util:         require('./lib/N3Util'),
 };
 
-// Load submodules on first access
-Object.keys(exports).forEach(function (submodule) {
-  Object.defineProperty(exports, submodule, {
-    configurable: true,
-    enumerable: true,
-    get: function () {
-      delete exports[submodule];
-      return exports[submodule] = globalRequire('./lib/N3' + submodule);
-    },
+},{"./lib/N3DataFactory":4,"./lib/N3Lexer":5,"./lib/N3Parser":6,"./lib/N3Store":7,"./lib/N3StreamParser":8,"./lib/N3StreamWriter":9,"./lib/N3Util":10,"./lib/N3Writer":11}],3:[function(require,module,exports){
+var RDF  = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+    XSD  = 'http://www.w3.org/2001/XMLSchema#',
+    SWAP = 'http://www.w3.org/2000/10/swap/';
+
+module.exports = {
+  xsd: {
+    decimal: XSD + 'decimal',
+    boolean: XSD + 'boolean',
+    double:  XSD + 'double',
+    integer: XSD + 'integer',
+    string:  XSD + 'string',
+  },
+  rdf: {
+    type:       RDF + 'type',
+    nil:        RDF + 'nil',
+    first:      RDF + 'first',
+    rest:       RDF + 'rest',
+    langString: RDF + 'langString',
+  },
+  owl: {
+    sameAs: 'http://www.w3.org/2002/07/owl#sameAs',
+  },
+  r: {
+    forSome: SWAP + 'reify#forSome',
+    forAll:  SWAP + 'reify#forAll',
+  },
+  log: {
+    implies: SWAP + 'log#implies',
+  },
+};
+
+},{}],4:[function(require,module,exports){
+// N3.js implementations of the RDF/JS core data types
+// See https://github.com/rdfjs/representation-task-force/blob/master/interface-spec.md
+
+var namespaces = require('./IRIs');
+var rdf = namespaces.rdf,
+    xsd = namespaces.xsd;
+
+var DataFactory, DEFAULTGRAPH;
+
+var _blankNodeCounter = 0;
+
+// ## Term constructor
+function Term(id) {
+  if (!(this instanceof Term))
+    return new Term(id);
+  this.id = id;
+}
+// ### Makes this class a subclass of the given type
+Term.subclass = function subclass(Type, name) {
+  Type.prototype = Object.create(this.prototype, {
+    constructor: { value: Type },
+    termType:    { value: name || Type.name },
   });
+  Type.subclass = subclass;
+};
+
+// ### Returns whether this object represents the same term as the other
+Term.prototype.equals = function (other) {
+  // If both terms were created by this library,
+  // equality can be computed through ids
+  if (other instanceof Term)
+    return this.id === other.id;
+  // Otherwise, compare term type and value
+  return !!other && this.termType === other.termType &&
+                    this.value    === other.value;
+};
+
+// ### Returns a plain object representation of this term
+Term.prototype.toJSON = function () {
+  return {
+    termType: this.termType,
+    value:    this.value,
+  };
+};
+
+// ### Constructs a term from the given internal string ID
+function fromId(id, factory) {
+  factory = factory || DataFactory;
+
+  // Falsy value or empty string indicate the default graph
+  if (!id)
+    return factory.defaultGraph();
+
+  // Identify the term type based on the first character
+  switch (id[0]) {
+  case '_': return factory.blankNode(id.substr(2));
+  case '?': return factory.variable(id.substr(1));
+  case '"':
+    // Shortcut for internal literals
+    if (factory === DataFactory)
+      return new Literal(id);
+    // Literal without datatype or language
+    if (id[id.length - 1] === '"')
+      return factory.literal(id.substr(1, id.length - 2));
+    // Literal with datatype or language
+    var endPos = id.lastIndexOf('"', id.length - 1);
+    return factory.literal(id.substr(1, endPos - 1),
+            id[endPos + 1] === '@' ? id.substr(endPos + 2)
+                                   : factory.namedNode(id.substr(endPos + 3)));
+  default:  return factory.namedNode(id);
+  }
+}
+
+// ### Constructs an internal string ID from the given term or ID string
+function toId(term) {
+  if (typeof term === 'string')
+    return term;
+  if (term instanceof Term)
+    return term.id;
+  if (!term)
+    return DEFAULTGRAPH.value;
+
+  // Term instantiated with another library
+  switch (term.termType) {
+  case 'NamedNode':    return term.value;
+  case 'BlankNode':    return '_:' + term.value;
+  case 'Variable':     return '?' + term.value;
+  case 'DefaultGraph': return '';
+  case 'Literal':      return '"' + term.value + '"' +
+    (term.language ? '@' + term.language :
+      (term.datatype && term.datatype.value !== xsd.string ? '^^' + term.datatype.value : ''));
+  default: throw new Error('Unexpected termType: ' + term.termType);
+  }
+}
+
+// ## NamedNode constructor
+function NamedNode(iri) {
+  if (!(this instanceof NamedNode))
+    return new NamedNode(iri);
+  this.id = iri;
+}
+Term.subclass(NamedNode, 'NamedNode');
+
+// ### The IRI of this named node
+Object.defineProperty(NamedNode.prototype, 'value', {
+  get: function () { return this.id; },
 });
 
-},{"./lib/N3Lexer":3,"./lib/N3Parser":4,"./lib/N3Store":5,"./lib/N3StreamParser":6,"./lib/N3StreamWriter":7,"./lib/N3Util":8,"./lib/N3Writer":9}],3:[function(require,module,exports){
+
+// ## BlankNode constructor
+function BlankNode(name) {
+  if (!(this instanceof BlankNode))
+    return new BlankNode(name);
+  this.id = '_:' + name;
+}
+Term.subclass(BlankNode, 'BlankNode');
+
+// ### The name of this blank node
+Object.defineProperty(BlankNode.prototype, 'value', {
+  get: function () { return this.id.substr(2); },
+});
+
+
+// ## Variable constructor
+function Variable(name) {
+  if (!(this instanceof Variable))
+    return new Variable(name);
+  this.id = '?' + name;
+}
+Term.subclass(Variable, 'Variable');
+
+// ### The name of this variable
+Object.defineProperty(Variable.prototype, 'value', {
+  get: function () { return this.id.substr(1); },
+});
+
+
+// ## Literal constructor
+function Literal(id) {
+  if (!(this instanceof Literal))
+    return new Literal(id);
+  this.id = id;
+}
+Term.subclass(Literal, 'Literal');
+
+// ### The text value of this literal
+Object.defineProperty(Literal.prototype, 'value', {
+  get: function () {
+    return this.id.substring(1, this.id.lastIndexOf('"'));
+  },
+});
+
+// ### The language of this literal
+Object.defineProperty(Literal.prototype, 'language', {
+  get: function () {
+    // Find the last quotation mark (e.g., '"abc"@en-us')
+    var id = this.id, atPos = id.lastIndexOf('"') + 1;
+    // If "@" it follows, return the remaining substring; empty otherwise
+    return atPos < id.length && id[atPos++] === '@' ? id.substr(atPos).toLowerCase() : '';
+  },
+});
+
+// ### The datatype IRI of this literal
+Object.defineProperty(Literal.prototype, 'datatype', {
+  get: function () {
+    return new NamedNode(this.datatypeString);
+  },
+});
+
+// ### The datatype string of this literal
+Object.defineProperty(Literal.prototype, 'datatypeString', {
+  get: function () {
+    // Find the last quotation mark (e.g., '"abc"^^http://ex.org/types#t')
+    var id = this.id, dtPos = id.lastIndexOf('"') + 1, ch;
+    // If "^" it follows, return the remaining substring
+    return dtPos < id.length && (ch = id[dtPos]) === '^' ? id.substr(dtPos + 2) :
+           // If "@" follows, return rdf:langString; xsd:string otherwise
+           (ch !== '@' ? xsd.string : rdf.langString);
+  },
+});
+
+// ### Returns whether this object represents the same term as the other
+Literal.prototype.equals = function (other) {
+  // If both literals were created by this library,
+  // equality can be computed through ids
+  if (other instanceof Literal)
+    return this.id === other.id;
+  // Otherwise, compare term type, value, language, and datatype
+  return !!other && !!other.datatype &&
+                    this.termType === other.termType &&
+                    this.value    === other.value    &&
+                    this.language === other.language &&
+                    this.datatype.value === other.datatype.value;
+};
+
+// ### Returns a plain object representation of this term
+Literal.prototype.toJSON = function () {
+  return {
+    termType: this.termType,
+    value:    this.value,
+    language: this.language,
+    datatype: { termType: 'NamedNode', value: this.datatypeString },
+  };
+};
+
+
+// ## DefaultGraph singleton
+function DefaultGraph() {
+  return DEFAULTGRAPH || this;
+}
+Term.subclass(DefaultGraph, 'DefaultGraph');
+
+// Initialize singleton
+DEFAULTGRAPH = new DefaultGraph();
+DEFAULTGRAPH.id = '';
+
+// ### The empty string
+Object.defineProperty(DefaultGraph.prototype, 'value', { value: '' });
+
+// ### Returns whether this object represents the same term as the other
+DefaultGraph.prototype.equals = function (other) {
+  // If both terms were created by this library,
+  // equality can be computed through strict equality;
+  // otherwise, compare term types.
+  return (this === other) || (!!other && (this.termType === other.termType));
+};
+
+
+// ## Quad constructor
+function Quad(subject, predicate, object, graph) {
+  if (!(this instanceof Quad))
+    return new Quad();
+  this.subject   = subject;
+  this.predicate = predicate;
+  this.object    = object;
+  this.graph     = graph || DEFAULTGRAPH;
+}
+
+// ### Returns a plain object representation of this quad
+Quad.prototype.toJSON = function () {
+  return {
+    subject:   this.subject.toJSON(),
+    predicate: this.predicate.toJSON(),
+    object:    this.object.toJSON(),
+    graph:     this.graph.toJSON(),
+  };
+};
+
+// ### Returns whether this object represents the same quad as the other
+Quad.prototype.equals = function (other) {
+  return !!other && this.subject.equals(other.subject)     &&
+                    this.predicate.equals(other.predicate) &&
+                    this.object.equals(other.object)       &&
+                    this.graph.equals(other.graph);
+};
+
+
+// ## DataFactory functions
+
+// ### Creates an IRI
+function namedNode(iri) {
+  return new NamedNode(iri);
+}
+
+// ### Creates a blank node
+function blankNode(name) {
+  if (!name)
+    name = 'n3-' + _blankNodeCounter++;
+  return new BlankNode(name);
+}
+
+// ### Creates a literal
+function literal(value, languageOrDataType) {
+  // Create a language-tagged string
+  if (typeof languageOrDataType === 'string')
+    return new Literal('"' + value + '"@' + languageOrDataType.toLowerCase());
+
+  // Create a datatyped literal
+  var datatype = languageOrDataType && languageOrDataType.value || '';
+  if (!datatype) {
+    switch (typeof value) {
+    // Convert a boolean
+    case 'boolean':
+      datatype = xsd.boolean;
+      break;
+    // Convert an integer or double
+    case 'number':
+      if (Number.isFinite(value))
+        datatype = Number.isInteger(value) ? xsd.integer : xsd.double;
+      else {
+        datatype = xsd.double;
+        if (!Number.isNaN(value))
+          value = value > 0 ? 'INF' : '-INF';
+      }
+      break;
+    // No datatype, so convert a plain string
+    default:
+      return new Literal('"' + value + '"');
+    }
+  }
+  return new Literal('"' + value + '"^^' + datatype);
+}
+
+// ### Creates a variable
+function variable(name) {
+  return new Variable(name);
+}
+
+// ### Returns the default graph
+function defaultGraph() {
+  return DEFAULTGRAPH;
+}
+
+// ### Creates a quad
+function quad(subject, predicate, object, graph) {
+  return new Quad(subject, predicate, object, graph);
+}
+
+
+// ## Module exports
+module.exports = DataFactory = {
+  // ### Public factory functions
+  namedNode: namedNode,
+  blankNode: blankNode,
+  variable:  variable,
+  literal:   literal,
+  defaultGraph: defaultGraph,
+  quad:      quad,
+  triple:    quad,
+
+  // ### Internal datatype constructors
+  internal: {
+    Term:      Term,
+    NamedNode: NamedNode,
+    BlankNode: BlankNode,
+    Variable:  Variable,
+    Literal:   Literal,
+    DefaultGraph: DefaultGraph,
+    Quad:      Quad,
+    Triple:    Quad,
+    fromId:    fromId,
+    toId:      toId,
+  },
+};
+
+},{"./IRIs":3}],5:[function(require,module,exports){
+(function (setImmediate){
 // **N3Lexer** tokenizes N3 documents.
+var xsd = require('./IRIs').xsd;
+
 var fromCharCode = String.fromCharCode;
 var immediately = typeof setImmediate === 'function' ? setImmediate :
                   function setImmediate(func) { setTimeout(func, 0); };
@@ -121,9 +485,9 @@ N3Lexer.prototype = {
 
   _iri: /^<((?:[^ <>{}\\]|\\[uU])+)>[ \t]*/, // IRI with escape sequences; needs sanity check after unescaping
   _unescapedIri: /^<([^\x00-\x20<>\\"\{\}\|\^\`]*)>[ \t]*/, // IRI without escape sequences; no unescaping
-  _unescapedString: /^"[^"\\\r\n]+"/, // non-empty string without escape sequences
-  _singleQuotedString: /^"(?:[^"\\\r\n]|\\.)*"(?=[^"])|^'(?:[^'\\\r\n]|\\.)*'(?=[^'])/,
-  _tripleQuotedString: /^""("[^"\\]*(?:(?:\\.|"(?!""))[^"\\]*)*")""|^''('[^'\\]*(?:(?:\\.|'(?!''))[^'\\]*)*')''/,
+  _unescapedString: /^"([^"\\\r\n]+)"/, // non-empty string without escape sequences
+  _singleQuotedString: /^"((?:[^"\\\r\n]|\\.)*)"(?=[^"])|^'((?:[^'\\\r\n]|\\.)*)'(?=[^'])/,
+  _tripleQuotedString: /^"""([^"\\]*(?:(?:\\.|"(?!""))[^"\\]*)*)"""|^'''([^'\\]*(?:(?:\\.|'(?!''))[^'\\]*)*)'''/,
   _langcode: /^@([a-z]+(?:-[a-z0-9]+)*)(?=[^a-z0-9\-])/i,
   _prefix: /^((?:[A-Za-z\xc0-\xd6\xd8-\xf6\xf8-\u02ff\u0370-\u037d\u037f-\u1fff\u200c\u200d\u2070-\u218f\u2c00-\u2fef\u3001-\ud7ff\uf900-\ufdcf\ufdf0-\ufffd]|[\ud800-\udb7f][\udc00-\udfff])(?:\.?[\-0-9A-Z_a-z\xb7\xc0-\xd6\xd8-\xf6\xf8-\u037d\u037f-\u1fff\u200c\u200d\u203f\u2040\u2070-\u218f\u2c00-\u2fef\u3001-\ud7ff\uf900-\ufdcf\ufdf0-\ufffd]|[\ud800-\udb7f][\udc00-\udfff])*)?:(?=[#\s<])/,
   _prefixed: /^((?:[A-Za-z\xc0-\xd6\xd8-\xf6\xf8-\u02ff\u0370-\u037d\u037f-\u1fff\u200c\u200d\u2070-\u218f\u2c00-\u2fef\u3001-\ud7ff\uf900-\ufdcf\ufdf0-\ufffd]|[\ud800-\udb7f][\udc00-\udfff])(?:\.?[\-0-9A-Z_a-z\xb7\xc0-\xd6\xd8-\xf6\xf8-\u037d\u037f-\u1fff\u200c\u200d\u203f\u2040\u2070-\u218f\u2c00-\u2fef\u3001-\ud7ff\uf900-\ufdcf\ufdf0-\ufffd]|[\ud800-\udb7f][\udc00-\udfff])*)?:((?:(?:[0-:A-Z_a-z\xc0-\xd6\xd8-\xf6\xf8-\u02ff\u0370-\u037d\u037f-\u1fff\u200c\u200d\u2070-\u218f\u2c00-\u2fef\u3001-\ud7ff\uf900-\ufdcf\ufdf0-\ufffd]|[\ud800-\udb7f][\udc00-\udfff]|%[0-9a-fA-F]{2}|\\[!#-\/;=?\-@_~])(?:(?:[\.\-0-:A-Z_a-z\xb7\xc0-\xd6\xd8-\xf6\xf8-\u037d\u037f-\u1fff\u200c\u200d\u203f\u2040\u2070-\u218f\u2c00-\u2fef\u3001-\ud7ff\uf900-\ufdcf\ufdf0-\ufffd]|[\ud800-\udb7f][\udc00-\udfff]|%[0-9a-fA-F]{2}|\\[!#-\/;=?\-@_~])*(?:[\-0-:A-Z_a-z\xb7\xc0-\xd6\xd8-\xf6\xf8-\u037d\u037f-\u1fff\u200c\u200d\u203f\u2040\u2070-\u218f\u2c00-\u2fef\u3001-\ud7ff\uf900-\ufdcf\ufdf0-\ufffd]|[\ud800-\udb7f][\udc00-\udfff]|%[0-9a-fA-F]{2}|\\[!#-\/;=?\-@_~]))?)?)(?:[ \t]+|(?=\.?[,;!\^\s#()\[\]\{\}"'<]))/,
@@ -174,7 +538,7 @@ N3Lexer.prototype = {
 
       // Look for specific token types based on the first character
       var line = this._line, type = '', value = '', prefix = '',
-          firstChar = input[0], match = null, matchLength = 0, unescaped, inconclusive = false;
+          firstChar = input[0], match = null, matchLength = 0, inconclusive = false;
       switch (firstChar) {
       case '^':
         // We need at least 3 tokens lookahead to distinguish ^^<IRI> and ^^pre:fixed
@@ -205,14 +569,14 @@ N3Lexer.prototype = {
           type = 'IRI', value = match[1];
         // Try to find a full IRI with escape sequences
         else if (match = this._iri.exec(input)) {
-          unescaped = this._unescape(match[1]);
-          if (unescaped === null || illegalIriChars.test(unescaped))
+          value = this._unescape(match[1]);
+          if (value === null || illegalIriChars.test(value))
             return reportSyntaxError(this);
-          type = 'IRI', value = unescaped;
+          type = 'IRI';
         }
         // Try to find a backwards implication arrow
         else if (this._n3Mode && input.length > 1 && input[1] === '=')
-          type = 'inverse', matchLength = 2, value = 'http://www.w3.org/2000/10/swap/log#implies';
+          type = 'inverse', matchLength = 2, value = '>';
         break;
 
       case '_':
@@ -228,24 +592,21 @@ N3Lexer.prototype = {
       case "'":
         // Try to find a non-empty double-quoted literal without escape sequences
         if (match = this._unescapedString.exec(input))
-          type = 'literal', value = match[0];
+          value = match[1];
         // Try to find any other literal wrapped in a pair of single or double quotes
-        else if (match = this._singleQuotedString.exec(input)) {
-          unescaped = this._unescape(match[0]);
-          if (unescaped === null)
-            return reportSyntaxError(this);
-          type = 'literal', value = unescaped.replace(/^'|'$/g, '"');
-        }
+        else if (match = this._singleQuotedString.exec(input))
+          value = this._unescape(typeof match[1] === 'string' ? match[1] : match[2]);
         // Try to find a literal wrapped in three pairs of single or double quotes
         else if (match = this._tripleQuotedString.exec(input)) {
-          unescaped = match[1] || match[2];
-          // Count the newlines and advance line counter
-          this._line += unescaped.split(/\r\n|\r|\n/).length - 1;
-          unescaped = this._unescape(unescaped);
-          if (unescaped === null)
-            return reportSyntaxError(this);
-          type = 'literal', value = unescaped.replace(/^'|'$/g, '"');
+          value = typeof match[1] === 'string' ? match[1] : match[2];
+          // Advance line counter
+          this._line += value.split(/\r\n|\r|\n/).length - 1;
+          value = this._unescape(value);
         }
+        if (value === null)
+          return reportSyntaxError(this);
+        if (match !== null)
+          type = 'literal';
         break;
 
       case '?':
@@ -289,9 +650,9 @@ N3Lexer.prototype = {
         // Therefore, try inserting a space if we're at the end of the input.
         if (match = this._number.exec(input) ||
             inputFinished && (match = this._number.exec(input + ' '))) {
-          type = 'literal';
-          value = '"' + match[0] + '"^^http://www.w3.org/2001/XMLSchema#' +
-                  (match[1] ? 'double' : (/^[+\-]?\d+$/.test(match[0]) ? 'integer' : 'decimal'));
+          type = 'literal', value = match[0];
+          prefix = (match[1] ? xsd.double :
+                    (/^[+\-]?\d+$/.test(match[0]) ? xsd.integer : xsd.decimal));
         }
         break;
 
@@ -312,7 +673,7 @@ N3Lexer.prototype = {
       case 't':
         // Try to match a boolean
         if (match = this._boolean.exec(input))
-          type = 'literal', value = '"' + match[0] + '"^^http://www.w3.org/2001/XMLSchema#boolean';
+          type = 'literal', value = match[0], prefix = xsd.boolean;
         else
           inconclusive = true;
         break;
@@ -320,7 +681,7 @@ N3Lexer.prototype = {
       case 'a':
         // Try to find an abbreviated predicate
         if (match = this._shortPredicates.exec(input))
-          type = 'abbreviation', value = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+          type = 'abbreviation', value = 'a';
         else
           inconclusive = true;
         break;
@@ -330,9 +691,9 @@ N3Lexer.prototype = {
         if (this._n3Mode && input.length > 1) {
           type = 'abbreviation';
           if (input[1] !== '>')
-            matchLength = 1, value = 'http://www.w3.org/2002/07/owl#sameAs';
+            matchLength = 1, value = '=';
           else
-            matchLength = 2, value = 'http://www.w3.org/2000/10/swap/log#implies';
+            matchLength = 2, value = '>';
         }
         break;
 
@@ -490,17 +851,14 @@ N3Lexer.prototype = {
 // ## Exports
 module.exports = N3Lexer;
 
-},{}],4:[function(require,module,exports){
+}).call(this,require("timers").setImmediate)
+},{"./IRIs":3,"timers":39}],6:[function(require,module,exports){
 // **N3Parser** parses N3 documents.
-var N3Lexer = require('./N3Lexer');
+var N3Lexer = require('./N3Lexer'),
+    DataFactory = require('./N3DataFactory'),
+    namespaces = require('./IRIs');
 
-var RDF_PREFIX = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
-    RDF_NIL    = RDF_PREFIX + 'nil',
-    RDF_FIRST  = RDF_PREFIX + 'first',
-    RDF_REST   = RDF_PREFIX + 'rest';
-
-var QUANTIFIERS_GRAPH = 'urn:n3:quantifiers';
-
+// Regexes for IRIs
 var absoluteIRI = /^[a-z][a-z0-9+.-]*:/i,
     schemeAuthority = /^(?:([a-z][a-z0-9+.-]*:))?(?:\/\/[^\/]*)?/i,
     dotSegments = /(?:^|\/)\.\.?(?:$|[\/#?])/;
@@ -517,7 +875,8 @@ function N3Parser(options) {
 
   // Set the document IRI
   options = options || {};
-  this._setBase(options.documentIRI);
+  this._setBase(options.baseIRI);
+  options.factory && initDataFactory(this, options.factory);
 
   // Set supported features depending on the format
   var format = (typeof options.format === 'string') ?
@@ -538,7 +897,7 @@ function N3Parser(options) {
     };
   }
   this._blankNodePrefix = typeof options.blankNodePrefix !== 'string' ? '' :
-                            '_:' + options.blankNodePrefix.replace(/^_:/, '');
+                            options.blankNodePrefix.replace(/^(?!_:)/, '_:');
   this._lexer = options.lexer || new N3Lexer({ lineMode: isLineMode, n3: isN3 });
   // Disable explicit quantifiers by default
   this._explicitQuantifiers = !!options.explicitQuantifiers;
@@ -553,6 +912,11 @@ N3Parser._resetBlankNodeIds = function () {
 
 N3Parser.prototype = {
   // ## Private methods
+
+  // ### `_blank` creates a new blank node
+  _blank: function () {
+    return this._blankNode('b' + blankNodeCount++);
+  },
 
   // ### `_setBase` sets the base IRI to resolve relative IRIs
   _setBase: function (baseIRI) {
@@ -590,7 +954,7 @@ N3Parser.prototype = {
       this._inversePredicate = false;
       // In N3, blank nodes are scoped to a formula
       // (using a dot as separator, as a blank node label cannot start with it)
-      this._prefixes._ = this._graph + '.';
+      this._prefixes._ = (this._graph ? this._graph.id.substr(2) + '.' : '.');
       // Quantifiers are scoped to a formula
       this._quantified = Object.create(this._quantified);
     }
@@ -654,43 +1018,47 @@ N3Parser.prototype = {
     // Read a relative or absolute IRI
     case 'IRI':
     case 'typeIRI':
-      value = (this._base === null || absoluteIRI.test(token.value)) ?
-              token.value : this._resolveIRI(token);
+      value = this._namedNode(this._base === null || absoluteIRI.test(token.value) ?
+                              token.value : this._resolveIRI(token));
       break;
-    // Read a blank node or prefixed name
+    // Read a prefixed name
     case 'type':
-    case 'blank':
     case 'prefixed':
       var prefix = this._prefixes[token.prefix];
       if (prefix === undefined)
         return this._error('Undefined prefix "' + token.prefix + ':"', token);
-      value = prefix + token.value;
+      value = this._namedNode(prefix + token.value);
+      break;
+    // Read a blank node
+    case 'blank':
+      value = this._blankNode(this._prefixes[token.prefix] + token.value);
       break;
     // Read a variable
     case 'var':
-      return token.value;
+      value = this._variable(token.value.substr(1));
+      break;
     // Everything else is not an entity
     default:
       return this._error('Expected entity but got ' + token.type, token);
     }
     // In N3 mode, replace the entity if it is quantified
-    if (!quantifier && this._n3Mode && (value in this._quantified))
-      value = this._quantified[value];
+    if (!quantifier && this._n3Mode && (value.id in this._quantified))
+      value = this._quantified[value.id];
     return value;
   },
 
-  // ### `_readSubject` reads a triple's subject
+  // ### `_readSubject` reads a quad's subject
   _readSubject: function (token) {
     this._predicate = null;
     switch (token.type) {
     case '[':
-      // Start a new triple with a new blank node as subject
+      // Start a new quad with a new blank node as subject
       this._saveContext('blank', this._graph,
-                        this._subject = '_:b' + blankNodeCount++, null, null);
+                        this._subject = this._blank(), null, null);
       return this._readBlankNodeHead;
     case '(':
       // Start a new list
-      this._saveContext('list', this._graph, RDF_NIL, null, null);
+      this._saveContext('list', this._graph, this.RDF_NIL, null, null);
       this._subject = null;
       return this._readListItem;
     case '{':
@@ -698,7 +1066,7 @@ N3Parser.prototype = {
       if (!this._n3Mode)
         return this._error('Unexpected graph', token);
       this._saveContext('formula', this._graph,
-                        this._graph = '_:b' + blankNodeCount++, null, null);
+                        this._graph = this._blank(), null, null);
       return this._readSubject;
     case '}':
        // No subject; the graph in which we are reading is closed instead
@@ -707,15 +1075,15 @@ N3Parser.prototype = {
       if (!this._n3Mode)
         return this._error('Unexpected "@forSome"', token);
       this._subject = null;
-      this._predicate = 'http://www.w3.org/2000/10/swap/reify#forSome';
-      this._quantifiedPrefix = '_:b';
+      this._predicate = this.N3_FORSOME;
+      this._quantifier = this._blankNode;
       return this._readQuantifierList;
     case '@forAll':
       if (!this._n3Mode)
         return this._error('Unexpected "@forAll"', token);
       this._subject = null;
-      this._predicate = 'http://www.w3.org/2000/10/swap/reify#forAll';
-      this._quantifiedPrefix = '?b-';
+      this._predicate = this.N3_FORALL;
+      this._quantifier = this._variable;
       return this._readQuantifierList;
     default:
       // Read the subject entity
@@ -731,14 +1099,14 @@ N3Parser.prototype = {
     return this._readPredicateOrNamedGraph;
   },
 
-  // ### `_readPredicate` reads a triple's predicate
+  // ### `_readPredicate` reads a quad's predicate
   _readPredicate: function (token) {
     var type = token.type;
     switch (type) {
     case 'inverse':
       this._inversePredicate = true;
     case 'abbreviation':
-      this._predicate = token.value;
+      this._predicate = this.ABBREVIATIONS[token.value];
       break;
     case '.':
     case ']':
@@ -763,20 +1131,27 @@ N3Parser.prototype = {
     return this._readObject;
   },
 
-  // ### `_readObject` reads a triple's object
+  // ### `_readObject` reads a quad's object
   _readObject: function (token) {
     switch (token.type) {
     case 'literal':
-      this._object = token.value;
-      return this._readDataTypeOrLang;
+      // Regular literal, can still get a datatype or language
+      if (token.prefix.length === 0) {
+        this._literalValue = token.value;
+        return this._readDataTypeOrLang;
+      }
+      // Pre-datatyped string literal (prefix stores the datatype)
+      else
+        this._object = this._literal(token.value, this._namedNode(token.prefix));
+      break;
     case '[':
-      // Start a new triple with a new blank node as subject
+      // Start a new quad with a new blank node as subject
       this._saveContext('blank', this._graph, this._subject, this._predicate,
-                        this._subject = '_:b' + blankNodeCount++);
+                        this._subject = this._blank());
       return this._readBlankNodeHead;
     case '(':
       // Start a new list
-      this._saveContext('list', this._graph, this._subject, this._predicate, RDF_NIL);
+      this._saveContext('list', this._graph, this._subject, this._predicate, this.RDF_NIL);
       this._subject = null;
       return this._readListItem;
     case '{':
@@ -784,7 +1159,7 @@ N3Parser.prototype = {
       if (!this._n3Mode)
         return this._error('Unexpected graph', token);
       this._saveContext('formula', this._graph, this._subject, this._predicate,
-                        this._graph = '_:b' + blankNodeCount++);
+                        this._graph = this._blank());
       return this._readSubject;
     default:
       // Read the object entity
@@ -797,7 +1172,7 @@ N3Parser.prototype = {
     return this._getContextEndReader();
   },
 
-  // ### `_readPredicateOrNamedGraph` reads a triple's predicate, or a named graph
+  // ### `_readPredicateOrNamedGraph` reads a quad's predicate, or a named graph
   _readPredicateOrNamedGraph: function (token) {
     return token.type === '{' ? this._readGraph(token) : this._readPredicate(token);
   },
@@ -828,9 +1203,9 @@ N3Parser.prototype = {
     if (token.type !== ']')
       return this._readBlankNodePunctuation(token);
 
-    // Store blank node triple
+    // Store blank node quad
     if (this._subject !== null)
-      this._triple(this._subject, this._predicate, this._object, this._graph);
+      this._emit(this._subject, this._predicate, this._object, this._graph);
 
     // Restore the parent context containing this blank node
     var empty = this._predicate === null;
@@ -848,7 +1223,7 @@ N3Parser.prototype = {
   _readPredicateAfterBlank: function (token) {
     // If a dot follows a blank node in top context, there is no predicate
     if (token.type === '.' && !this._contextStack.length) {
-      this._subject = null; // cancel the current triple
+      this._subject = null; // cancel the current quad
       return this._readPunctuation(token);
     }
     return this._readPredicate(token);
@@ -861,51 +1236,58 @@ N3Parser.prototype = {
         prevList = this._subject,         // The previous list that contains this list
         stack = this._contextStack,       // The stack of parent contexts
         parent = stack[stack.length - 1], // The parent containing the current list
-        next = this._readListItem,        // The next function to execute
-        itemComplete = true;              // Whether the item has been read fully
+        next = this._readListItem;        // The next function to execute
 
     switch (token.type) {
     case '[':
-      // Stack the current list triple and start a new triple with a blank node as subject
-      this._saveContext('blank', this._graph, list = '_:b' + blankNodeCount++,
-                        RDF_FIRST, this._subject = item = '_:b' + blankNodeCount++);
+      // Stack the current list quad and start a new quad with a blank node as subject
+      this._saveContext('blank', this._graph,
+                        list = this._blank(), this.RDF_FIRST,
+                        this._subject = item = this._blank());
       next = this._readBlankNodeHead;
       break;
     case '(':
-      // Stack the current list triple and start a new list
-      this._saveContext('list', this._graph, list = '_:b' + blankNodeCount++,
-                        RDF_FIRST, RDF_NIL);
+      // Stack the current list quad and start a new list
+      this._saveContext('list', this._graph,
+                        list = this._blank(), this.RDF_FIRST, this.RDF_NIL);
       this._subject = null;
       break;
     case ')':
       // Closing the list; restore the parent context
       this._restoreContext();
-      // If this list is contained within a parent list, return the membership triple here.
+      // If this list is contained within a parent list, return the membership quad here.
       // This will be `<parent list element> rdf:first <this list>.`.
       if (stack.length !== 0 && stack[stack.length - 1].type === 'list')
-        this._triple(this._subject, this._predicate, this._object, this._graph);
+        this._emit(this._subject, this._predicate, this._object, this._graph);
       // Was this list the parent's subject?
       if (this._predicate === null) {
         // The next token is the predicate
         next = this._readPredicate;
         // No list tail if this was an empty list
-        if (this._subject === RDF_NIL)
+        if (this._subject === this.RDF_NIL)
           return next;
       }
       // The list was in the parent context's object
       else {
         next = this._getContextEndReader();
         // No list tail if this was an empty list
-        if (this._object === RDF_NIL)
+        if (this._object === this.RDF_NIL)
           return next;
       }
       // Close the list by making the head nil
-      list = RDF_NIL;
+      list = this.RDF_NIL;
       break;
     case 'literal':
-      item = token.value;
-      itemComplete = false; // Can still have a datatype or language
-      next = this._readListItemDataTypeOrLang;
+      // Regular literal, can still get a datatype or language
+      if (token.prefix.length === 0) {
+        this._literalValue = token.value;
+        next = this._readListItemDataTypeOrLang;
+      }
+      // Pre-datatyped string literal (prefix stores the datatype)
+      else {
+        item = this._literal(token.value, this._namedNode(token.prefix));
+        next = this._getContextEndReader();
+      }
       break;
     default:
       if ((item = this._readEntity(token)) === undefined)
@@ -914,7 +1296,7 @@ N3Parser.prototype = {
 
      // Create a new blank node if no item head was assigned yet
     if (list === null)
-      this._subject = list = '_:b' + blankNodeCount++;
+      this._subject = list = this._blank();
 
     // Is this the first element of the list?
     if (prevList === null) {
@@ -926,61 +1308,62 @@ N3Parser.prototype = {
     }
     else {
       // Continue the previous list with the current list
-      this._triple(prevList, RDF_REST, list, this._graph);
+      this._emit(prevList, this.RDF_REST, list, this._graph);
     }
-    // Add the item's value
+    // If an item was read, add it to the list
     if (item !== null) {
       // In N3 mode, the item might be a path
       if (this._n3Mode && (token.type === 'IRI' || token.type === 'prefixed')) {
         // Create a new context to add the item's path
-        this._saveContext('item', this._graph, list, RDF_FIRST, item);
+        this._saveContext('item', this._graph, list, this.RDF_FIRST, item);
         this._subject = item, this._predicate = null;
         // _readPath will restore the context and output the item
         return this._getPathReader(this._readListItem);
       }
-      // Output the item if it is complete
-      if (itemComplete)
-        this._triple(list, RDF_FIRST, item, this._graph);
-      // Otherwise, save it for completion
-      else
-        this._object = item;
+      // Output the item
+      this._emit(list, this.RDF_FIRST, item, this._graph);
     }
     return next;
   },
 
-  // ### `_readDataTypeOrLang` reads an _optional_ data type or language
+  // ### `_readDataTypeOrLang` reads an _optional_ datatype or language
   _readDataTypeOrLang: function (token) {
     return this._completeLiteral(token, false);
   },
 
-  // ### `_readListItemDataTypeOrLang` reads an _optional_ data type or language in a list
+  // ### `_readListItemDataTypeOrLang` reads an _optional_ datatype or language in a list
   _readListItemDataTypeOrLang: function (token) {
     return this._completeLiteral(token, true);
   },
 
-  // ### `_completeLiteral` completes the object with a data type or language
+  // ### `_completeLiteral` completes a literal with an optional datatype or language
   _completeLiteral: function (token, listItem) {
-    var suffix = false;
     switch (token.type) {
-    // Add a "^^type" suffix for types (IRIs and blank nodes)
+    // Create a datatyped literal
     case 'type':
     case 'typeIRI':
-      suffix = true;
-      this._object += '^^' + this._readEntity(token);
+      var datatype = this._readEntity(token);
+      if (datatype === undefined) return; // No datatype means an error occurred
+      this._object = this._literal(this._literalValue, datatype);
+      token = null;
       break;
-    // Add an "@lang" suffix for language tags
+    // Create a language-tagged string
     case 'langcode':
-      suffix = true;
-      this._object += '@' + token.value.toLowerCase();
+      this._object = this._literal(this._literalValue, token.value);
+      token = null;
       break;
+    // Create a simple string literal
+    default:
+      this._object = this._literal(this._literalValue);
     }
     // If this literal was part of a list, write the item
     // (we could also check the context stack, but passing in a flag is faster)
     if (listItem)
-      this._triple(this._subject, RDF_FIRST, this._object, this._graph);
-    // Continue with the rest of the input
-    if (suffix)
+      this._emit(this._subject, this.RDF_FIRST, this._object, this._graph);
+    // If the token was consumed, continue with the rest of the input
+    if (token === null)
       return this._getContextEndReader();
+    // Otherwise, consume the token now
     else {
       this._readCallback = this._getContextEndReader();
       return this._readCallback(token);
@@ -992,9 +1375,9 @@ N3Parser.prototype = {
     if (token.type !== '}')
       return this._readPunctuation(token);
 
-    // Store the last triple of the formula
+    // Store the last quad of the formula
     if (this._subject !== null)
-      this._triple(this._subject, this._predicate, this._object, this._graph);
+      this._emit(this._subject, this._predicate, this._object, this._graph);
 
     // Restore the parent context containing this formula
     this._restoreContext();
@@ -1003,7 +1386,7 @@ N3Parser.prototype = {
     return this._object === null ? this._readPredicate : this._getContextEndReader();
   },
 
-  // ### `_readPunctuation` reads punctuation between triples or triple parts
+  // ### `_readPunctuation` reads punctuation between quads or quad parts
   _readPunctuation: function (token) {
     var next, subject = this._subject, graph = this._graph,
         inversePredicate = this._inversePredicate;
@@ -1035,15 +1418,15 @@ N3Parser.prototype = {
         next = this._readQuadPunctuation;
         break;
       }
-      return this._error('Expected punctuation to follow "' + this._object + '"', token);
+      return this._error('Expected punctuation to follow "' + this._object.id + '"', token);
     }
-    // A triple has been completed now, so return it
+    // A quad has been completed now, so return it
     if (subject !== null) {
       var predicate = this._predicate, object = this._object;
       if (!inversePredicate)
-        this._triple(subject, predicate, object,  graph);
+        this._emit(subject, predicate, object,  graph);
       else
-        this._triple(object,  predicate, subject, graph);
+        this._emit(object,  predicate, subject, graph);
     }
     return next;
   },
@@ -1061,10 +1444,10 @@ N3Parser.prototype = {
       next = this._readObject;
       break;
     default:
-      return this._error('Expected punctuation to follow "' + this._object + '"', token);
+      return this._error('Expected punctuation to follow "' + this._object.id + '"', token);
     }
-    // A triple has been completed now, so return it
-    this._triple(this._subject, this._predicate, this._object, this._graph);
+    // A quad has been completed now, so return it
+    this._emit(this._subject, this._predicate, this._object, this._graph);
     return next;
   },
 
@@ -1087,9 +1470,9 @@ N3Parser.prototype = {
   _readPrefixIRI: function (token) {
     if (token.type !== 'IRI')
       return this._error('Expected IRI to follow prefix "' + this._prefix + ':"', token);
-    var prefixIRI = this._readEntity(token);
-    this._prefixes[this._prefix] = prefixIRI;
-    this._prefixCallback(this._prefix, prefixIRI);
+    var prefixNode = this._readEntity(token);
+    this._prefixes[this._prefix] = prefixNode.value;
+    this._prefixCallback(this._prefix, prefixNode);
     return this._readDeclarationPunctuation;
   },
 
@@ -1120,7 +1503,7 @@ N3Parser.prototype = {
   _readNamedGraphBlankLabel: function (token) {
     if (token.type !== ']')
       return this._error('Invalid graph label', token);
-    this._subject = '_:b' + blankNodeCount++;
+    this._subject = this._blank();
     return this._readGraph;
   },
 
@@ -1150,19 +1533,19 @@ N3Parser.prototype = {
     }
     // Without explicit quantifiers, map entities to a quantified entity
     if (!this._explicitQuantifiers)
-      this._quantified[entity] = this._quantifiedPrefix + blankNodeCount++;
+      this._quantified[entity.id] = this._quantifier('b' + blankNodeCount++);
     // With explicit quantifiers, output the reified quantifier
     else {
       // If this is the first item, start a new quantifier list
       if (this._subject === null)
-        this._triple(this._graph || '', this._predicate,
-                     this._subject = '_:b' + blankNodeCount++, QUANTIFIERS_GRAPH);
+        this._emit(this._graph || this.DEFAULTGRAPH, this._predicate,
+                   this._subject = this._blank(), this.QUANTIFIERS_GRAPH);
       // Otherwise, continue the previous list
       else
-        this._triple(this._subject, RDF_REST,
-                     this._subject = '_:b' + blankNodeCount++, QUANTIFIERS_GRAPH);
+        this._emit(this._subject, this.RDF_REST,
+                   this._subject = this._blank(), this.QUANTIFIERS_GRAPH);
       // Output the list item
-      this._triple(this._subject, RDF_FIRST, entity, QUANTIFIERS_GRAPH);
+      this._emit(this._subject, this.RDF_FIRST, entity, this.QUANTIFIERS_GRAPH);
     }
     return this._readQuantifierPunctuation;
   },
@@ -1176,7 +1559,7 @@ N3Parser.prototype = {
     else {
       // With explicit quantifiers, close the quantifier list
       if (this._explicitQuantifiers) {
-        this._triple(this._subject, RDF_REST, RDF_NIL, QUANTIFIERS_GRAPH);
+        this._emit(this._subject, this.RDF_REST, this.RDF_NIL, this.QUANTIFIERS_GRAPH);
         this._subject = null;
       }
       // Read a dot
@@ -1208,7 +1591,7 @@ N3Parser.prototype = {
         // Switch back to the context of the list
         this._restoreContext();
         // Output the list item
-        this._triple(this._subject, RDF_FIRST, item, this._graph);
+        this._emit(this._subject, this.RDF_FIRST, item, this._graph);
       }
       return this._afterPath(token);
     }
@@ -1216,7 +1599,7 @@ N3Parser.prototype = {
 
   // ### `_readForwardPath` reads a '!' path
   _readForwardPath: function (token) {
-    var subject, predicate, object = '_:b' + blankNodeCount++;
+    var subject, predicate, object = this._blank();
     // The next token is the predicate
     if ((predicate = this._readEntity(token)) === undefined)
       return;
@@ -1226,14 +1609,14 @@ N3Parser.prototype = {
     // If we were reading an object, replace the subject by the path's object
     else
       subject = this._object,  this._object  = object;
-    // Emit the path's current triple and read its next section
-    this._triple(subject, predicate, object, this._graph);
+    // Emit the path's current quad and read its next section
+    this._emit(subject, predicate, object, this._graph);
     return this._readPath;
   },
 
   // ### `_readBackwardPath` reads a '^' path
   _readBackwardPath: function (token) {
-    var subject = '_:b' + blankNodeCount++, predicate, object;
+    var subject = this._blank(), predicate, object;
     // The next token is the predicate
     if ((predicate = this._readEntity(token)) === undefined)
       return;
@@ -1243,8 +1626,8 @@ N3Parser.prototype = {
     // If we were reading an object, replace the subject by the path's subject
     else
       object = this._object,  this._object  = subject;
-    // Emit the path's current triple and read its next section
-    this._triple(subject, predicate, object, this._graph);
+    // Emit the path's current quad and read its next section
+    this._emit(subject, predicate, object, this._graph);
     return this._readPath;
   },
 
@@ -1264,10 +1647,9 @@ N3Parser.prototype = {
     }
   },
 
-  // ### `_triple` emits a triple through the callback
-  _triple: function (subject, predicate, object, graph) {
-    this._callback(null,
-      { subject: subject, predicate: predicate, object: object, graph: graph || '' });
+  // ### `_emit` sends a quad through the callback
+  _emit: function (subject, predicate, object, graph) {
+    this._callback(null, this._quad(subject, predicate, object, graph || this.DEFAULTGRAPH));
   },
 
   // ### `_error` emits an error message through the callback
@@ -1279,6 +1661,7 @@ N3Parser.prototype = {
       previousToken: this._lexer.previousToken,
     };
     this._callback(err);
+    this._callback = noop;
   },
 
   // ### `_resolveIRI` resolves a relative IRI token against the base path,
@@ -1366,32 +1749,33 @@ N3Parser.prototype = {
 
   // ## Public methods
 
-  // ### `parse` parses the N3 input and emits each parsed triple through the callback
-  parse: function (input, tripleCallback, prefixCallback) {
+  // ### `parse` parses the N3 input and emits each parsed quad through the callback
+  parse: function (input, quadCallback, prefixCallback) {
     var self = this;
     // The read callback is the next function to be executed when a token arrives.
     // We start reading in the top context.
     this._readCallback = this._readInTopContext;
     this._sparqlStyle = false;
     this._prefixes = Object.create(null);
-    this._prefixes._ = this._blankNodePrefix || '_:b' + blankNodePrefix++ + '_';
+    this._prefixes._ = this._blankNodePrefix ? this._blankNodePrefix.substr(2)
+                                             : 'b' + blankNodePrefix++ + '_';
     this._prefixCallback = prefixCallback || noop;
     this._inversePredicate = false;
     this._quantified = Object.create(null);
 
-    // Parse synchronously if no triple callback is given
-    if (!tripleCallback) {
-      var triples = [], error;
-      this._callback = function (e, t) { e ? (error = e) : t && triples.push(t); };
+    // Parse synchronously if no quad callback is given
+    if (!quadCallback) {
+      var quads = [], error;
+      this._callback = function (e, t) { e ? (error = e) : t && quads.push(t); };
       this._lexer.tokenize(input).every(function (token) {
         return self._readCallback = self._readCallback(token);
       });
       if (error) throw error;
-      return triples;
+      return quads;
     }
 
     // Parse asynchronously otherwise, executing the read callback when a token arrives
-    this._callback = tripleCallback;
+    this._callback = quadCallback;
     this._lexer.tokenize(input, function (error, token) {
       if (error !== null)
         self._callback(error), self._callback = noop;
@@ -1404,20 +1788,48 @@ N3Parser.prototype = {
 // The empty function
 function noop() {}
 
+// Initializes the parser with the given data factory
+function initDataFactory(parser, factory) {
+  // Set factory methods
+  var namedNode = factory.namedNode;
+  parser._namedNode   = namedNode;
+  parser._blankNode   = factory.blankNode;
+  parser._literal     = factory.literal;
+  parser._variable    = factory.variable;
+  parser._quad        = factory.quad;
+  parser.DEFAULTGRAPH = factory.defaultGraph();
+
+  // Set common named nodes
+  parser.RDF_FIRST  = namedNode(namespaces.rdf.first);
+  parser.RDF_REST   = namedNode(namespaces.rdf.rest);
+  parser.RDF_NIL    = namedNode(namespaces.rdf.nil);
+  parser.N3_FORALL  = namedNode(namespaces.r.forAll);
+  parser.N3_FORSOME = namedNode(namespaces.r.forSome);
+  parser.ABBREVIATIONS = {
+    'a': namedNode(namespaces.rdf.type),
+    '=': namedNode(namespaces.owl.sameAs),
+    '>': namedNode(namespaces.log.implies),
+  };
+  parser.QUANTIFIERS_GRAPH = namedNode('urn:n3:quantifiers');
+}
+initDataFactory(N3Parser.prototype, DataFactory);
+
 // ## Exports
 module.exports = N3Parser;
 
-},{"./N3Lexer":3}],5:[function(require,module,exports){
-// **N3Store** objects store N3 triples by graph in memory.
+},{"./IRIs":3,"./N3DataFactory":4,"./N3Lexer":5}],7:[function(require,module,exports){
+// **N3Store** objects store N3 quads by graph in memory.
 
-var expandPrefixedName = require('./N3Util').expandPrefixedName;
+var DataFactory = require('./N3DataFactory');
+var toId = DataFactory.internal.toId,
+    fromId = DataFactory.internal.fromId;
 
 // ## Constructor
-function N3Store(triples, options) {
+function N3Store(quads, options) {
   if (!(this instanceof N3Store))
-    return new N3Store(triples, options);
+    return new N3Store(quads, options);
 
-  // The number of triples is initially zero
+  // The number of quads is initially zero
   this._size = 0;
   // `_graphs` contains subject, predicate, and object indexes per graph
   this._graphs = Object.create(null);
@@ -1430,30 +1842,28 @@ function N3Store(triples, options) {
   // `_blankNodeIndex` is the index of the last automatically named blank node
   this._blankNodeIndex = 0;
 
-  // Shift parameters if `triples` is not given
-  if (!options && triples && !triples[0])
-    options = triples, triples = null;
+  // Shift parameters if `quads` is not given
+  if (!options && quads && !quads[0])
+    options = quads, quads = null;
   options = options || {};
+  this._factory = options.factory || DataFactory;
 
-  // Add triples and prefixes if passed
-  this._prefixes = Object.create(null);
-  if (options.prefixes)
-    this.addPrefixes(options.prefixes);
-  if (triples)
-    this.addTriples(triples);
+  // Add quads if passed
+  if (quads)
+    this.addQuads(quads);
 }
 
 N3Store.prototype = {
   // ## Public properties
 
-  // ### `size` returns the number of triples in the store
+  // ### `size` returns the number of quads in the store
   get size() {
-    // Return the triple count if if was cached
+    // Return the quad count if if was cached
     var size = this._size;
     if (size !== null)
       return size;
 
-    // Calculate the number of triples by counting to the deepest level
+    // Calculate the number of quads by counting to the deepest level
     size = 0;
     var graphs = this._graphs, subjects, subject;
     for (var graphKey in graphs)
@@ -1465,22 +1875,22 @@ N3Store.prototype = {
 
   // ## Private methods
 
-  // ### `_addToIndex` adds a triple to a three-layered index.
+  // ### `_addToIndex` adds a quad to a three-layered index.
   // Returns if the index has changed, if the entry did not already exist.
   _addToIndex: function (index0, key0, key1, key2) {
     // Create layers as necessary
     var index1 = index0[key0] || (index0[key0] = {});
     var index2 = index1[key1] || (index1[key1] = {});
-    // Setting the key to _any_ value signals the presence of the triple
+    // Setting the key to _any_ value signals the presence of the quad
     var existed = key2 in index2;
     if (!existed)
       index2[key2] = null;
     return !existed;
   },
 
-  // ### `_removeFromIndex` removes a triple from a three-layered index
+  // ### `_removeFromIndex` removes a quad from a three-layered index
   _removeFromIndex: function (index0, key0, key1, key2) {
-    // Remove the triple from the index
+    // Remove the quad from the index
     var index1 = index0[key0], index2 = index1[key1], key;
     delete index2[key2];
 
@@ -1491,15 +1901,15 @@ N3Store.prototype = {
     delete index0[key0];
   },
 
-  // ### `_findInIndex` finds a set of triples in a three-layered index.
+  // ### `_findInIndex` finds a set of quads in a three-layered index.
   // The index base is `index0` and the keys at each level are `key0`, `key1`, and `key2`.
   // Any of these keys can be undefined, which is interpreted as a wildcard.
   // `name0`, `name1`, and `name2` are the names of the keys at each level,
-  // used when reconstructing the resulting triple
+  // used when reconstructing the resulting quad
   // (for instance: _subject_, _predicate_, and _object_).
-  // Finally, `graph` will be the graph of the created triples.
+  // Finally, `graph` will be the graph of the created quads.
   // If `callback` is given, each result is passed through it
-  // and iteration halts when it returns truthy for any triple.
+  // and iteration halts when it returns truthy for any quad.
   // If instead `array` is given, each result is added to the array.
   _findInIndex: function (index0, key0, key1, key2, name0, name1, name2, graph, callback, array) {
     var tmp, index1, index2, varCount = !key0 + !key1 + !key2,
@@ -1520,15 +1930,17 @@ N3Store.prototype = {
           if (index2 = index1[value1]) {
             // If a key is specified, use only that part of index 2, if it exists.
             var values = key2 ? (key2 in index2 ? [key2] : []) : Object.keys(index2);
-            // Create triples for all items found in index 2.
-            for (var l = values.length - 1; l >= 0; l--) {
-              var result = { subject: '', predicate: '', object: '', graph: graph };
-              result[name0] = entity0;
-              result[name1] = entity1;
-              result[name2] = entityKeys[values[l]];
+            // Create quads for all items found in index 2.
+            for (var l = 0; l < values.length; l++) {
+              var parts = { subject: null, predicate: null, object: null };
+              parts[name0] = fromId(entity0, this._factory);
+              parts[name1] = fromId(entity1, this._factory);
+              parts[name2] = fromId(entityKeys[values[l]], this._factory);
+              var quad = this._factory.quad(
+                parts.subject, parts.predicate, parts.object, fromId(graph, this._factory));
               if (array)
-                array.push(result);
-              else if (callback(result))
+                array.push(quad);
+              else if (callback(quad))
                 return true;
             }
           }
@@ -1572,7 +1984,7 @@ N3Store.prototype = {
     }
   },
 
-  // ### `_countInIndex` counts matching triples in a three-layered index.
+  // ### `_countInIndex` counts matching quads in a three-layered index.
   // The index base is `index0` and the keys at each level are `key0`, `key1`, and `key2`.
   // Any of these keys can be undefined, which is interpreted as a wildcard.
   _countInIndex: function (index0, key0, key1, key2) {
@@ -1586,9 +1998,9 @@ N3Store.prototype = {
         if (key1) (tmp = index1, index1 = {})[key1] = tmp[key1];
         for (var value1 in index1) {
           if (index2 = index1[value1]) {
-            // If a key is specified, count the triple if it exists
+            // If a key is specified, count the quad if it exists
             if (key2) (key2 in index2) && count++;
-            // Otherwise, count all triples
+            // Otherwise, count all quads
             else count += Object.keys(index2).length;
           }
         }
@@ -1614,23 +2026,28 @@ N3Store.prototype = {
     return function (id) {
       if (!(id in uniqueIds)) {
         uniqueIds[id] = true;
-        callback(entities[id]);
+        callback(fromId(entities[id]));
       }
     };
   },
 
   // ## Public methods
 
-  // ### `addTriple` adds a new N3 triple to the store.
-  // Returns if the triple index has changed, if the triple did not already exist.
-  addTriple: function (subject, predicate, object, graph) {
-    // Shift arguments if a triple object is given instead of components
+  // ### `addQuad` adds a new quad to the store.
+  // Returns if the quad index has changed, if the quad did not already exist.
+  addQuad: function (subject, predicate, object, graph) {
+    // Shift arguments if a quad object is given instead of components
     if (!predicate)
       graph = subject.graph, object = subject.object,
         predicate = subject.predicate, subject = subject.subject;
 
+    // Convert terms to internal string representation
+    subject = toId(subject);
+    predicate = toId(predicate);
+    object = toId(object);
+    graph = toId(graph);
+
     // Find the graph that will contain the triple
-    graph = graph || '';
     var graphItem = this._graphs[graph];
     // Create the graph if it doesn't exist yet
     if (!graphItem) {
@@ -1653,38 +2070,39 @@ N3Store.prototype = {
     this._addToIndex(graphItem.predicates, predicate, object,    subject);
     this._addToIndex(graphItem.objects,    object,    subject,   predicate);
 
-    // The cached triple count is now invalid
+    // The cached quad count is now invalid
     this._size = null;
     return changed;
   },
 
-  // ### `addTriples` adds multiple N3 triples to the store
-  addTriples: function (triples) {
-    for (var i = triples.length - 1; i >= 0; i--)
-      this.addTriple(triples[i]);
+  // ### `addQuads` adds multiple quads to the store
+  addQuads: function (quads) {
+    for (var i = 0; i < quads.length; i++)
+      this.addQuad(quads[i]);
   },
 
-  // ### `addPrefix` adds support for querying with the given prefix
-  addPrefix: function (prefix, iri) {
-    this._prefixes[prefix] = iri;
+  // ### `import` adds a stream of quads to the store
+  import: function (stream) {
+    var self = this;
+    stream.on('data', function (quad) { self.addQuad(quad); });
+    return stream;
   },
 
-  // ### `addPrefixes` adds support for querying with the given prefixes
-  addPrefixes: function (prefixes) {
-    for (var prefix in prefixes)
-      this.addPrefix(prefix, prefixes[prefix]);
-  },
-
-  // ### `removeTriple` removes an N3 triple from the store if it exists
-  removeTriple: function (subject, predicate, object, graph) {
-    // Shift arguments if a triple object is given instead of components
+  // ### `removeQuad` removes a quad from the store if it exists
+  removeQuad: function (subject, predicate, object, graph) {
+    // Shift arguments if a quad object is given instead of components
     if (!predicate)
       graph = subject.graph, object = subject.object,
         predicate = subject.predicate, subject = subject.subject;
-    graph = graph || '';
+
+    // Convert terms to internal string representation
+    subject = toId(subject);
+    predicate = toId(predicate);
+    object = toId(object);
+    graph = toId(graph);
 
     // Find internal identifiers for all components
-    // and verify the triple exists.
+    // and verify the quad exists.
     var graphItem, ids = this._ids, graphs = this._graphs, subjects, predicates;
     if (!(subject    = ids[subject]) || !(predicate = ids[predicate]) ||
         !(object     = ids[object])  || !(graphItem = graphs[graph])  ||
@@ -1705,27 +2123,28 @@ N3Store.prototype = {
     return true;
   },
 
-  // ### `removeTriples` removes multiple N3 triples from the store
-  removeTriples: function (triples) {
-    for (var i = triples.length - 1; i >= 0; i--)
-      this.removeTriple(triples[i]);
+  // ### `removeQuads` removes multiple quads from the store
+  removeQuads: function (quads) {
+    for (var i = 0; i < quads.length; i++)
+      this.removeQuad(quads[i]);
   },
 
-  // ### `getTriples` returns an array of triples matching a pattern, expanding prefixes as necessary.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  getTriples: function (subject, predicate, object, graph) {
-    var prefixes = this._prefixes;
-    return this.getTriplesByIRI(
-      expandPrefixedName(subject,   prefixes),
-      expandPrefixedName(predicate, prefixes),
-      expandPrefixedName(object,    prefixes),
-      expandPrefixedName(graph,     prefixes)
-    );
+  // ### `remove` removes a stream of quads from the store
+  remove: function (stream) {
+    var self = this;
+    stream.on('data', function (quad) { self.removeQuad(quad); });
+    return stream;
   },
 
-  // ### `getTriplesByIRI` returns an array of triples matching a pattern.
+  // ### `getQuads` returns an array of quads matching a pattern.
   // Setting any field to `undefined` or `null` indicates a wildcard.
-  getTriplesByIRI: function (subject, predicate, object, graph) {
+  getQuads: function (subject, predicate, object, graph) {
+    // Convert terms to internal string representation
+    subject = subject && toId(subject);
+    predicate = predicate && toId(predicate);
+    object = object && toId(object);
+    graph = graph && toId(graph);
+
     var quads = [], graphs = this._getGraphs(graph), content,
         ids = this._ids, subjectId, predicateId, objectId;
 
@@ -1766,21 +2185,15 @@ N3Store.prototype = {
     return quads;
   },
 
-  // ### `countTriples` returns the number of triples matching a pattern, expanding prefixes as necessary.
+  // ### `countQuads` returns the number of quads matching a pattern.
   // Setting any field to `undefined` or `null` indicates a wildcard.
-  countTriples: function (subject, predicate, object, graph) {
-    var prefixes = this._prefixes;
-    return this.countTriplesByIRI(
-      expandPrefixedName(subject,   prefixes),
-      expandPrefixedName(predicate, prefixes),
-      expandPrefixedName(object,    prefixes),
-      expandPrefixedName(graph,     prefixes)
-    );
-  },
+  countQuads: function (subject, predicate, object, graph) {
+    // Convert terms to internal string representation
+    subject = subject && toId(subject);
+    predicate = predicate && toId(predicate);
+    object = object && toId(object);
+    graph = graph && toId(graph);
 
-  // ### `countTriplesByIRI` returns the number of triples matching a pattern.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  countTriplesByIRI: function (subject, predicate, object, graph) {
     var count = 0, graphs = this._getGraphs(graph), content,
         ids = this._ids, subjectId, predicateId, objectId;
 
@@ -1815,72 +2228,37 @@ N3Store.prototype = {
     return count;
   },
 
-  // ### `forEach` executes the callback on all triples.
+  // ### `forEach` executes the callback on all quads.
   // Setting any field to `undefined` or `null` indicates a wildcard.
   forEach: function (callback, subject, predicate, object, graph) {
-    var prefixes = this._prefixes;
-    this.forEachByIRI(
-      callback,
-      expandPrefixedName(subject,   prefixes),
-      expandPrefixedName(predicate, prefixes),
-      expandPrefixedName(object,    prefixes),
-      expandPrefixedName(graph,     prefixes)
-    );
-  },
-
-  // ### `forEachByIRI` executes the callback on all triples.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  forEachByIRI: function (callback, subject, predicate, object, graph) {
-    this.someByIRI(function (quad) {
+    this.some(function (quad) {
       callback(quad);
       return false;
     }, subject, predicate, object, graph);
   },
 
-  // ### `every` executes the callback on all triples,
+  // ### `every` executes the callback on all quads,
   // and returns `true` if it returns truthy for all them.
   // Setting any field to `undefined` or `null` indicates a wildcard.
   every: function (callback, subject, predicate, object, graph) {
-    var prefixes = this._prefixes;
-    return this.everyByIRI(
-      callback,
-      expandPrefixedName(subject,   prefixes),
-      expandPrefixedName(predicate, prefixes),
-      expandPrefixedName(object,    prefixes),
-      expandPrefixedName(graph,     prefixes)
-    );
-  },
-
-  // ### `everyByIRI` executes the callback on all triples,
-  // and returns `true` if it returns truthy for all them.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  everyByIRI: function (callback, subject, predicate, object, graph) {
     var some = false;
-    var every = !this.someByIRI(function (quad) {
+    var every = !this.some(function (quad) {
       some = true;
       return !callback(quad);
     }, subject, predicate, object, graph);
     return some && every;
   },
 
-  // ### `some` executes the callback on all triples,
+  // ### `some` executes the callback on all quads,
   // and returns `true` if it returns truthy for any of them.
   // Setting any field to `undefined` or `null` indicates a wildcard.
   some: function (callback, subject, predicate, object, graph) {
-    var prefixes = this._prefixes;
-    return this.someByIRI(
-      callback,
-      expandPrefixedName(subject,   prefixes),
-      expandPrefixedName(predicate, prefixes),
-      expandPrefixedName(object,    prefixes),
-      expandPrefixedName(graph,     prefixes)
-    );
-  },
+    // Convert terms to internal string representation
+    subject = subject && toId(subject);
+    predicate = predicate && toId(predicate);
+    object = object && toId(object);
+    graph = graph && toId(graph);
 
-  // ### `someByIRI` executes the callback on all triples,
-  // and returns `true` if it returns truthy for any of them.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  someByIRI: function (callback, subject, predicate, object, graph) {
     var graphs = this._getGraphs(graph), content,
         ids = this._ids, subjectId, predicateId, objectId;
 
@@ -1891,7 +2269,7 @@ N3Store.prototype = {
       return false;
 
     for (var graphId in graphs) {
-      // Only if the specified graph contains triples, there can be result
+      // Only if the specified graph contains triples, there can be results
       if (content = graphs[graphId]) {
         // Choose the optimal index, based on what fields are present
         if (subjectId) {
@@ -1935,37 +2313,19 @@ N3Store.prototype = {
   // ### `getSubjects` returns all subjects that match the pattern.
   // Setting any field to `undefined` or `null` indicates a wildcard.
   getSubjects: function (predicate, object, graph) {
-    var prefixes = this._prefixes;
-    return this.getSubjectsByIRI(
-      expandPrefixedName(predicate, prefixes),
-      expandPrefixedName(object,    prefixes),
-      expandPrefixedName(graph,     prefixes)
-    );
-  },
-
-  // ### `getSubjectsByIRI` returns all subjects that match the pattern.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  getSubjectsByIRI: function (predicate, object, graph) {
     var results = [];
-    this.forSubjectsByIRI(function (s) { results.push(s); }, predicate, object, graph);
+    this.forSubjects(function (s) { results.push(s); }, predicate, object, graph);
     return results;
   },
 
   // ### `forSubjects` executes the callback on all subjects that match the pattern.
   // Setting any field to `undefined` or `null` indicates a wildcard.
   forSubjects: function (callback, predicate, object, graph) {
-    var prefixes = this._prefixes;
-    this.forSubjectsByIRI(
-      callback,
-      expandPrefixedName(predicate, prefixes),
-      expandPrefixedName(object,    prefixes),
-      expandPrefixedName(graph,     prefixes)
-    );
-  },
+    // Convert terms to internal string representation
+    predicate = predicate && toId(predicate);
+    object = object && toId(object);
+    graph = graph && toId(graph);
 
-  // ### `forSubjectsByIRI` executes the callback on all subjects that match the pattern.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  forSubjectsByIRI: function (callback, predicate, object, graph) {
     var ids = this._ids, graphs = this._getGraphs(graph), content, predicateId, objectId;
     callback = this._uniqueEntities(callback);
 
@@ -1999,37 +2359,19 @@ N3Store.prototype = {
   // ### `getPredicates` returns all predicates that match the pattern.
   // Setting any field to `undefined` or `null` indicates a wildcard.
   getPredicates: function (subject, object, graph) {
-    var prefixes = this._prefixes;
-    return this.getPredicatesByIRI(
-      expandPrefixedName(subject, prefixes),
-      expandPrefixedName(object,  prefixes),
-      expandPrefixedName(graph,   prefixes)
-    );
-  },
-
-  // ### `getPredicatesByIRI` returns all predicates that match the pattern.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  getPredicatesByIRI: function (subject, object, graph) {
     var results = [];
-    this.forPredicatesByIRI(function (p) { results.push(p); }, subject, object, graph);
+    this.forPredicates(function (p) { results.push(p); }, subject, object, graph);
     return results;
   },
 
   // ### `forPredicates` executes the callback on all predicates that match the pattern.
   // Setting any field to `undefined` or `null` indicates a wildcard.
   forPredicates: function (callback, subject, object, graph) {
-    var prefixes = this._prefixes;
-    this.forPredicatesByIRI(
-      callback,
-      expandPrefixedName(subject, prefixes),
-      expandPrefixedName(object,  prefixes),
-      expandPrefixedName(graph,   prefixes)
-    );
-  },
+    // Convert terms to internal string representation
+    subject = subject && toId(subject);
+    object = object && toId(object);
+    graph = graph && toId(graph);
 
-  // ### `forPredicatesByIRI` executes the callback on all predicates that match the pattern.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  forPredicatesByIRI: function (callback, subject, object, graph) {
     var ids = this._ids, graphs = this._getGraphs(graph), content, subjectId, objectId;
     callback = this._uniqueEntities(callback);
 
@@ -2063,37 +2405,19 @@ N3Store.prototype = {
   // ### `getObjects` returns all objects that match the pattern.
   // Setting any field to `undefined` or `null` indicates a wildcard.
   getObjects: function (subject, predicate, graph) {
-    var prefixes = this._prefixes;
-    return this.getObjectsByIRI(
-      expandPrefixedName(subject,   prefixes),
-      expandPrefixedName(predicate, prefixes),
-      expandPrefixedName(graph,     prefixes)
-    );
-  },
-
-  // ### `getObjectsByIRI` returns all objects that match the pattern.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  getObjectsByIRI: function (subject, predicate, graph) {
     var results = [];
-    this.forObjectsByIRI(function (o) { results.push(o); }, subject, predicate, graph);
+    this.forObjects(function (o) { results.push(o); }, subject, predicate, graph);
     return results;
   },
 
   // ### `forObjects` executes the callback on all objects that match the pattern.
   // Setting any field to `undefined` or `null` indicates a wildcard.
   forObjects: function (callback, subject, predicate, graph) {
-    var prefixes = this._prefixes;
-    this.forObjectsByIRI(
-      callback,
-      expandPrefixedName(subject,   prefixes),
-      expandPrefixedName(predicate, prefixes),
-      expandPrefixedName(graph,     prefixes)
-    );
-  },
+    // Convert terms to internal string representation
+    subject = subject && toId(subject);
+    predicate = predicate && toId(predicate);
+    graph = graph && toId(graph);
 
-  // ### `forObjectsByIRI` executes the callback on all objects that match the pattern.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  forObjectsByIRI: function (callback, subject, predicate, graph) {
     var ids = this._ids, graphs = this._getGraphs(graph), content, subjectId, predicateId;
     callback = this._uniqueEntities(callback);
 
@@ -2127,39 +2451,16 @@ N3Store.prototype = {
   // ### `getGraphs` returns all graphs that match the pattern.
   // Setting any field to `undefined` or `null` indicates a wildcard.
   getGraphs: function (subject, predicate, object) {
-    var prefixes = this._prefixes;
-    return this.getGraphsByIRI(
-      expandPrefixedName(subject,   prefixes),
-      expandPrefixedName(predicate, prefixes),
-      expandPrefixedName(object,    prefixes)
-    );
-  },
-
-  // ### `getGraphsByIRI` returns all graphs that match the pattern.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  getGraphsByIRI: function (subject, predicate, object) {
     var results = [];
-    this.forGraphsByIRI(function (g) { results.push(g); }, subject, predicate, object);
+    this.forGraphs(function (g) { results.push(g); }, subject, predicate, object);
     return results;
   },
 
   // ### `forGraphs` executes the callback on all graphs that match the pattern.
   // Setting any field to `undefined` or `null` indicates a wildcard.
   forGraphs: function (callback, subject, predicate, object) {
-    var prefixes = this._prefixes;
-    this.forGraphsByIRI(
-      callback,
-      expandPrefixedName(subject,   prefixes),
-      expandPrefixedName(predicate, prefixes),
-      expandPrefixedName(object,    prefixes)
-    );
-  },
-
-  // ### `forGraphsByIRI` executes the callback on all graphs that match the pattern.
-  // Setting any field to `undefined` or `null` indicates a wildcard.
-  forGraphsByIRI: function (callback, subject, predicate, object) {
     for (var graph in this._graphs) {
-      this.someByIRI(function (quad) {
+      this.some(function (quad) {
         callback(quad.graph);
         return true; // Halt iteration of some()
       }, subject, predicate, object, graph);
@@ -2183,7 +2484,7 @@ N3Store.prototype = {
     // Add the blank node to the entities, avoiding the generation of duplicates
     this._ids[name] = ++this._id;
     this._entities[this._id] = name;
-    return name;
+    return this._factory.blankNode(name.substr(2));
   },
 };
 
@@ -2195,8 +2496,8 @@ function isString(s) {
 // ## Exports
 module.exports = N3Store;
 
-},{"./N3Util":8}],6:[function(require,module,exports){
-// **N3StreamParser** parses an N3 stream into a triple stream.
+},{"./N3DataFactory":4}],8:[function(require,module,exports){
+// **N3StreamParser** parses a text stream into a quad stream.
 var Transform = require('stream').Transform,
     util = require('util'),
     N3Parser = require('./N3Parser.js');
@@ -2214,15 +2515,15 @@ function N3StreamParser(options) {
   var self = this, parser = new N3Parser(options), onData, onEnd;
   // Pass dummy stream to obtain `data` and `end` callbacks
   parser.parse({
-    on: function (event, cb) {
+    on: function (event, callback) {
       switch (event) {
-      case 'data': onData = cb; break;
-      case 'end':   onEnd = cb; break;
+      case 'data': onData = callback; break;
+      case 'end':   onEnd = callback; break;
       }
     },
   },
-  // Handle triples by pushing them down the pipeline
-  function (error, t) { error && self.emit('error', error) || t && self.push(t); },
+  // Handle quads by pushing them down the pipeline
+  function (error, quad) { error && self.emit('error', error) || quad && self.push(quad); },
   // Emit prefixes through the `prefix` event
   function (prefix, uri) { self.emit('prefix', prefix, uri); });
 
@@ -2232,11 +2533,20 @@ function N3StreamParser(options) {
 }
 util.inherits(N3StreamParser, Transform);
 
+// ### Parses a stream of strings
+N3StreamParser.prototype.import = function (stream) {
+  var self = this;
+  stream.on('data',  function (chunk) { self.write(chunk); });
+  stream.on('end',   function ()      { self.end(); });
+  stream.on('error', function (error) { self.emit('error', error); });
+  return this;
+};
+
 // ## Exports
 module.exports = N3StreamParser;
 
-},{"./N3Parser.js":4,"stream":33,"util":38}],7:[function(require,module,exports){
-// **N3StreamWriter** serializes a triple stream into an N3 stream.
+},{"./N3Parser.js":6,"stream":38,"util":42}],9:[function(require,module,exports){
+// **N3StreamWriter** serializes a quad stream into a text stream.
 var Transform = require('stream').Transform,
     util = require('util'),
     N3Writer = require('./N3Writer.js');
@@ -2252,159 +2562,93 @@ function N3StreamWriter(options) {
 
   // Set up writer with a dummy stream object
   var self = this;
-  var writer = new N3Writer({
-    write: function (chunk, encoding, callback) { self.push(chunk); callback && callback(); },
+  var writer = this._writer = new N3Writer({
+    write: function (quad, encoding, callback) { self.push(quad); callback && callback(); },
     end: function (callback) { self.push(null); callback && callback(); },
   }, options);
 
   // Implement Transform methods on top of writer
-  this._transform = function (triple, encoding, done) { writer.addTriple(triple, done); };
+  this._transform = function (quad, encoding, done) { writer.addQuad(quad, done); };
   this._flush = function (done) { writer.end(done); };
 }
 util.inherits(N3StreamWriter, Transform);
 
+// ### Serializes a stream of quads
+N3StreamWriter.prototype.import = function (stream) {
+  var self = this;
+  stream.on('data',   function (quad)  { self.write(quad); });
+  stream.on('end',    function ()      { self.end(); });
+  stream.on('error',  function (error) { self.emit('error', error); });
+  stream.on('prefix', function (prefix, iri) { self._writer.addPrefix(prefix, iri); });
+  return this;
+};
+
 // ## Exports
 module.exports = N3StreamWriter;
 
-},{"./N3Writer.js":9,"stream":33,"util":38}],8:[function(require,module,exports){
+},{"./N3Writer.js":11,"stream":38,"util":42}],10:[function(require,module,exports){
 // **N3Util** provides N3 utility functions.
 
-var Xsd = 'http://www.w3.org/2001/XMLSchema#';
-var XsdString  = Xsd + 'string';
-var XsdInteger = Xsd + 'integer';
-var XsdDouble = Xsd + 'double';
-var XsdBoolean = Xsd + 'boolean';
-var RdfLangString = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString';
+var DataFactory = require('./N3DataFactory');
 
 var N3Util = {
-  // Tests whether the given entity (triple object) represents an IRI in the N3 library
-  isIRI: function (entity) {
-    if (typeof entity !== 'string')
-      return false;
-    else if (entity.length === 0)
-      return true;
-    else {
-      var firstChar = entity[0];
-      return firstChar !== '"' && firstChar !== '_';
-    }
+  // Tests whether the given term represents an IRI
+  isNamedNode: function (term) {
+    return !!term && term.termType === 'NamedNode';
   },
 
-  // Tests whether the given entity (triple object) represents a literal in the N3 library
-  isLiteral: function (entity) {
-    return typeof entity === 'string' && entity[0] === '"';
+  // Tests whether the given term represents a blank node
+  isBlankNode: function (term) {
+    return !!term && term.termType === 'BlankNode';
   },
 
-  // Tests whether the given entity (triple object) represents a blank node in the N3 library
-  isBlank: function (entity) {
-    return typeof entity === 'string' && entity.substr(0, 2) === '_:';
+  // Tests whether the given term represents a literal
+  isLiteral: function (term) {
+    return !!term && term.termType === 'Literal';
   },
 
-  // Tests whether the given entity represents the default graph
-  isDefaultGraph: function (entity) {
-    return !entity;
+  // Tests whether the given term represents a variable
+  isVariable: function (term) {
+    return !!term && term.termType === 'Variable';
   },
 
-  // Tests whether the given triple is in the default graph
-  inDefaultGraph: function (triple) {
-    return !triple.graph;
+  // Tests whether the given term represents the default graph
+  isDefaultGraph: function (term) {
+    return !!term && term.termType === 'DefaultGraph';
   },
 
-  // Gets the string value of a literal in the N3 library
-  getLiteralValue: function (literal) {
-    var match = /^"([^]*)"/.exec(literal);
-    if (!match)
-      throw new Error(literal + ' is not a literal');
-    return match[1];
-  },
-
-  // Gets the type of a literal in the N3 library
-  getLiteralType: function (literal) {
-    var match = /^"[^]*"(?:\^\^([^"]+)|(@)[^@"]+)?$/.exec(literal);
-    if (!match)
-      throw new Error(literal + ' is not a literal');
-    return match[1] || (match[2] ? RdfLangString : XsdString);
-  },
-
-  // Gets the language of a literal in the N3 library
-  getLiteralLanguage: function (literal) {
-    var match = /^"[^]*"(?:@([^@"]+)|\^\^[^"]+)?$/.exec(literal);
-    if (!match)
-      throw new Error(literal + ' is not a literal');
-    return match[1] ? match[1].toLowerCase() : '';
-  },
-
-  // Tests whether the given entity (triple object) represents a prefixed name
-  isPrefixedName: function (entity) {
-    return typeof entity === 'string' && /^[^:\/"']*:[^:\/"']+$/.test(entity);
-  },
-
-  // Expands the prefixed name to a full IRI (also when it occurs as a literal's type)
-  expandPrefixedName: function (prefixedName, prefixes) {
-    var match = /(?:^|"\^\^)([^:\/#"'\^_]*):[^\/]*$/.exec(prefixedName), prefix, base, index;
-    if (match)
-      prefix = match[1], base = prefixes[prefix], index = match.index;
-    if (base === undefined)
-      return prefixedName;
-
-    // The match index is non-zero when expanding a literal's type
-    return index === 0 ? base + prefixedName.substr(prefix.length + 1)
-                       : prefixedName.substr(0, index + 3) +
-                         base + prefixedName.substr(index + prefix.length + 4);
-  },
-
-  // Creates an IRI in N3.js representation
-  createIRI: function (iri) {
-    return iri && iri[0] === '"' ? N3Util.getLiteralValue(iri) : iri;
-  },
-
-  // Creates a literal in N3.js representation
-  createLiteral: function (value, modifier) {
-    if (!modifier) {
-      switch (typeof value) {
-      case 'boolean':
-        modifier = XsdBoolean;
-        break;
-      case 'number':
-        if (isFinite(value))
-          modifier = value % 1 === 0 ? XsdInteger : XsdDouble;
-        else {
-          modifier = XsdDouble;
-          if (!isNaN(value))
-            value = value > 0 ? 'INF' : '-INF';
-        }
-        break;
-      default:
-        return '"' + value + '"';
-      }
-    }
-    return '"' + value +
-           (/^[a-z]+(-[a-z0-9]+)*$/i.test(modifier) ? '"@'  + modifier.toLowerCase()
-                                                    : '"^^' + modifier);
+  // Tests whether the given quad is in the default graph
+  inDefaultGraph: function (quad) {
+    return N3Util.isDefaultGraph(quad.graph);
   },
 
   // Creates a function that prepends the given IRI to a local name
-  prefix: function (iri) {
-    return N3Util.prefixes({ '': iri })('');
+  prefix: function (iri, factory) {
+    return N3Util.prefixes({ '': iri }, factory)('');
   },
 
   // Creates a function that allows registering and expanding prefixes
-  prefixes: function (defaultPrefixes) {
+  prefixes: function (defaultPrefixes, factory) {
     // Add all of the default prefixes
     var prefixes = Object.create(null);
     for (var prefix in defaultPrefixes)
       processPrefix(prefix, defaultPrefixes[prefix]);
+    // Set the default factory if none was specified
+    factory = factory || DataFactory;
 
     // Registers a new prefix (if an IRI was specified)
     // or retrieves a function that expands an existing prefix (if no IRI was specified)
     function processPrefix(prefix, iri) {
       // Create a new prefix if an IRI is specified or the prefix doesn't exist
-      if (iri || !(prefix in prefixes)) {
-        var cache = Object.create(null);
-        iri = iri || '';
+      if (typeof iri === 'string') {
         // Create a function that expands the prefix
-        prefixes[prefix] = function (localName) {
-          return cache[localName] || (cache[localName] = iri + localName);
+        var cache = Object.create(null);
+        prefixes[prefix] = function (local) {
+          return cache[local] || (cache[local] = factory.namedNode(iri + local));
         };
+      }
+      else if (!(prefix in prefixes)) {
+        throw new Error('Unknown prefix: ' + prefix);
       }
       return prefixes[prefix];
     }
@@ -2415,15 +2659,16 @@ var N3Util = {
 // ## Exports
 module.exports = N3Util;
 
-},{}],9:[function(require,module,exports){
+},{"./N3DataFactory":4}],11:[function(require,module,exports){
 // **N3Writer** writes N3 documents.
 
-// Matches a literal as represented in memory by the N3 library
-var N3LiteralMatcher = /^"([^]*)"(?:\^\^(.+)|@([\-a-z]+))?$/i;
+var namespaces = require('./IRIs'),
+    DataFactory = require('./N3DataFactory');
 
-// rdf:type predicate (for 'a' abbreviation)
-var RDF_PREFIX = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
-    RDF_TYPE   = RDF_PREFIX + 'type';
+var DEFAULTGRAPH = DataFactory.defaultGraph();
+
+var rdf = namespaces.rdf,
+    xsd = namespaces.xsd;
 
 // Characters in literals that require escaping
 var escape    = /["\\\t\n\r\b\f\u0000-\u0019\ud800-\udbff]/,
@@ -2460,39 +2705,43 @@ function N3Writer(outputStream, options) {
   // Initialize writer, depending on the format
   this._subject = null;
   if (!(/triple|quad/i).test(options.format)) {
-    this._graph = '';
+    this._graph = DEFAULTGRAPH;
     this._prefixIRIs = Object.create(null);
     options.prefixes && this.addPrefixes(options.prefixes);
   }
   else {
-    this._writeTriple = this._writeTripleLine;
+    this._writeQuad = this._writeQuadLine;
   }
 }
 
 N3Writer.prototype = {
   // ## Private methods
 
+  // ### Whether the current graph is the default graph
+  get _inDefaultGraph() {
+    return DEFAULTGRAPH.equals(this._graph);
+  },
+
   // ### `_write` writes the argument to the output stream
   _write: function (string, callback) {
     this._outputStream.write(string, 'utf8', callback);
   },
 
-    // ### `_writeTriple` writes the triple to the output stream
-  _writeTriple: function (subject, predicate, object, graph, done) {
+  // ### `_writeQuad` writes the quad to the output stream
+  _writeQuad: function (subject, predicate, object, graph, done) {
     try {
       // Write the graph's label if it has changed
-      if (this._graph !== graph) {
+      if (!graph.equals(this._graph)) {
         // Close the previous graph and start the new one
-        this._write((this._subject === null ? '' : (this._graph ? '\n}\n' : '.\n')) +
-                    (graph ? this._encodeIriOrBlankNode(graph) + ' {\n' : ''));
+        this._write((this._subject === null ? '' : (this._inDefaultGraph ? '.\n' : '\n}\n')) +
+                    (DEFAULTGRAPH.equals(graph) ? '' : this._encodeIriOrBlank(graph) + ' {\n'));
+        this._graph = graph;
         this._subject = null;
-        // Don't treat identical blank nodes as repeating graphs
-        this._graph = graph[0] !== '[' ? graph : ']';
       }
       // Don't repeat the subject if it's the same
-      if (this._subject === subject) {
+      if (subject.equals(this._subject)) {
         // Don't repeat the predicate if it's the same
-        if (this._predicate === predicate)
+        if (predicate.equals(this._predicate))
           this._write(', ' + this._encodeObject(object), done);
         // Same subject, different predicate
         else
@@ -2500,94 +2749,76 @@ N3Writer.prototype = {
                       this._encodePredicate(this._predicate = predicate) + ' ' +
                       this._encodeObject(object), done);
       }
-      // Different subject; write the whole triple
+      // Different subject; write the whole quad
       else
         this._write((this._subject === null ? '' : '.\n') +
-                    this._encodeSubject(this._subject = subject) + ' ' +
+                    this._encodeIriOrBlank(this._subject = subject) + ' ' +
                     this._encodePredicate(this._predicate = predicate) + ' ' +
                     this._encodeObject(object), done);
     }
     catch (error) { done && done(error); }
   },
 
-  // ### `_writeTripleLine` writes the triple or quad to the output stream as a single line
-  _writeTripleLine: function (subject, predicate, object, graph, done) {
-    // Write the triple without prefixes
+  // ### `_writeQuadLine` writes the quad to the output stream as a single line
+  _writeQuadLine: function (subject, predicate, object, graph, done) {
+    // Write the quad without prefixes
     delete this._prefixMatch;
-    try { this._write(this.tripleToString(subject, predicate, object, graph), done); }
-    catch (error) { done && done(error); }
+    this._write(this.quadToString(subject, predicate, object, graph), done);
   },
 
-  // ### `tripleToString` serializes a triple or quad as a string
-  tripleToString: function (subject, predicate, object, graph) {
-    return  this._encodeIriOrBlankNode(subject)   + ' ' +
-            this._encodeIriOrBlankNode(predicate) + ' ' +
+  // ### `quadToString` serializes a quad as a string
+  quadToString: function (subject, predicate, object, graph) {
+    return  this._encodeIriOrBlank(subject)   + ' ' +
+            this._encodeIriOrBlank(predicate) + ' ' +
             this._encodeObject(object) +
-            (graph ? ' ' + this._encodeIriOrBlankNode(graph) + '.\n' : '.\n');
+            (graph && graph.value ? ' ' + this._encodeIriOrBlank(graph) + '.\n' : '.\n');
   },
 
-  // ### `triplesToString` serializes an array of triples or quads as a string
-  triplesToString: function (triples) {
-    return triples.map(function (t) {
-      return this.tripleToString(t.subject, t.predicate, t.object, t.graph);
+  // ### `quadsToString` serializes an array of quads as a string
+  quadsToString: function (quads) {
+    return quads.map(function (t) {
+      return this.quadToString(t.subject, t.predicate, t.object, t.graph);
     }, this).join('');
   },
 
-  // ### `_encodeIriOrBlankNode` represents an IRI or blank node
-  _encodeIriOrBlankNode: function (entity) {
+  // ### `_encodeIriOrBlank` represents an IRI or blank node
+  _encodeIriOrBlank: function (entity) {
     // A blank node or list is represented as-is
-    var firstChar = entity[0];
-    if (firstChar === '[' || firstChar === '(' || firstChar === '_' && entity[1] === ':')
-      return entity;
+    if (entity.termType !== 'NamedNode')
+      return 'id' in entity ? entity.id : '_:' + entity.value;
     // Escape special characters
-    if (escape.test(entity))
-      entity = entity.replace(escapeAll, characterReplacer);
+    var iri = entity.value;
+    if (escape.test(iri))
+      iri = iri.replace(escapeAll, characterReplacer);
     // Try to represent the IRI as prefixed name
-    var prefixMatch = this._prefixRegex.exec(entity);
-    return !prefixMatch ? '<' + entity + '>' :
-           (!prefixMatch[1] ? entity : this._prefixIRIs[prefixMatch[1]] + prefixMatch[2]);
+    var prefixMatch = this._prefixRegex.exec(iri);
+    return !prefixMatch ? '<' + iri + '>' :
+           (!prefixMatch[1] ? iri : this._prefixIRIs[prefixMatch[1]] + prefixMatch[2]);
   },
 
   // ### `_encodeLiteral` represents a literal
-  _encodeLiteral: function (value, type, language) {
+  _encodeLiteral: function (literal) {
     // Escape special characters
+    var value = literal.value;
     if (escape.test(value))
       value = value.replace(escapeAll, characterReplacer);
     // Write the literal, possibly with type or language
-    if (language)
-      return '"' + value + '"@' + language;
-    else if (type)
-      return '"' + value + '"^^' + this._encodeIriOrBlankNode(type);
+    if (literal.language)
+      return '"' + value + '"@' + literal.language;
+    else if (literal.datatype.value !== xsd.string)
+      return '"' + value + '"^^' + this._encodeIriOrBlank(literal.datatype);
     else
       return '"' + value + '"';
   },
 
-  // ### `_encodeSubject` represents a subject
-  _encodeSubject: function (subject) {
-    if (subject[0] === '"')
-      throw new Error('A literal as subject is not allowed: ' + subject);
-    // Don't treat identical blank nodes as repeating subjects
-    if (subject[0] === '[')
-      this._subject = ']';
-    return this._encodeIriOrBlankNode(subject);
-  },
-
   // ### `_encodePredicate` represents a predicate
   _encodePredicate: function (predicate) {
-    if (predicate[0] === '"')
-      throw new Error('A literal as predicate is not allowed: ' + predicate);
-    return predicate === RDF_TYPE ? 'a' : this._encodeIriOrBlankNode(predicate);
+    return predicate.value === rdf.type ? 'a' : this._encodeIriOrBlank(predicate);
   },
 
   // ### `_encodeObject` represents an object
   _encodeObject: function (object) {
-    // Represent an IRI or blank node
-    if (object[0] !== '"')
-      return this._encodeIriOrBlankNode(object);
-    // Represent a literal
-    var match = N3LiteralMatcher.exec(object);
-    if (!match) throw new Error('Invalid literal: ' + object);
-    return this._encodeLiteral(match[1], match[2], match[3]);
+    return object.termType === 'Literal' ? this._encodeLiteral(object) : this._encodeIriOrBlank(object);
   },
 
   // ### `_blockedWrite` replaces `_write` after the writer has been closed
@@ -2595,24 +2826,23 @@ N3Writer.prototype = {
     throw new Error('Cannot write because the writer has been closed.');
   },
 
-  // ### `addTriple` adds the triple to the output stream
-  addTriple: function (subject, predicate, object, graph, done) {
-    // The triple was given as a triple object, so shift parameters
+  // ### `addQuad` adds the quad to the output stream
+  addQuad: function (subject, predicate, object, graph, done) {
+    // The quad was given as an object, so shift parameters
     if (object === undefined)
-      this._writeTriple(subject.subject, subject.predicate, subject.object,
-                        subject.graph || '', predicate);
+      this._writeQuad(subject.subject, subject.predicate, subject.object, subject.graph, predicate);
     // The optional `graph` parameter was not provided
-    else if (typeof graph !== 'string')
-      this._writeTriple(subject, predicate, object, '', graph);
+    else if (typeof graph === 'function')
+      this._writeQuad(subject, predicate, object, DEFAULTGRAPH, graph);
     // The `graph` parameter was provided
     else
-      this._writeTriple(subject, predicate, object, graph, done);
+      this._writeQuad(subject, predicate, object, graph || DEFAULTGRAPH, done);
   },
 
-  // ### `addTriples` adds the triples to the output stream
-  addTriples: function (triples) {
-    for (var i = 0; i < triples.length; i++)
-      this.addTriple(triples[i]);
+  // ### `addQuads` adds the quads to the output stream
+  addQuads: function (quads) {
+    for (var i = 0; i < quads.length; i++)
+      this.addQuad(quads[i]);
   },
 
   // ### `addPrefix` adds the prefix to the output stream
@@ -2629,12 +2859,14 @@ N3Writer.prototype = {
     for (var prefix in prefixes) {
       // Verify whether the prefix can be used and does not exist yet
       var iri = prefixes[prefix];
+      if (typeof iri !== 'string')
+        iri = iri.value;
       if (/[#\/]$/.test(iri) && prefixIRIs[iri] !== (prefix += ':')) {
         hasPrefixes = true;
         prefixIRIs[iri] = prefix;
-        // Finish a possible pending triple
+        // Finish a possible pending quad
         if (this._subject !== null) {
-          this._write(this._graph ? '\n}\n' : '.\n');
+          this._write(this._inDefaultGraph ? '.\n' : '\n}\n');
           this._subject = null, this._graph = '';
         }
         // Write prefix
@@ -2662,8 +2894,8 @@ N3Writer.prototype = {
     // Empty blank node
     if (predicate === undefined)
       children = [];
-    // Blank node passed as blank("predicate", "object")
-    else if (typeof predicate === 'string')
+    // Blank node passed as blank(Term("predicate"), Term("object"))
+    else if (predicate.termType)
       children = [{ predicate: predicate, object: object }];
     // Blank node passed as blank({ predicate: predicate, object: object })
     else if (!('length' in predicate))
@@ -2672,13 +2904,13 @@ N3Writer.prototype = {
     switch (length = children.length) {
     // Generate an empty blank node
     case 0:
-      return '[]';
+      return new SerializedTerm('[]');
     // Generate a non-nested one-triple blank node
     case 1:
       child = children[0];
-      if (child.object[0] !== '[')
-        return '[ ' + this._encodePredicate(child.predicate) + ' ' +
-                      this._encodeObject(child.object) + ' ]';
+      if (!(child.object instanceof SerializedTerm))
+        return new SerializedTerm('[ ' + this._encodePredicate(child.predicate) + ' ' +
+                                  this._encodeObject(child.object) + ' ]');
     // Generate a multi-triple or nested blank node
     default:
       var contents = '[';
@@ -2686,7 +2918,7 @@ N3Writer.prototype = {
       for (var i = 0; i < length; i++) {
         child = children[i];
         // Write only the object is the predicate is the same as the previous
-        if (child.predicate === predicate)
+        if (child.predicate.equals(predicate))
           contents += ', ' + this._encodeObject(child.object);
         // Otherwise, write the predicate and the object
         else {
@@ -2696,7 +2928,7 @@ N3Writer.prototype = {
           predicate = child.predicate;
         }
       }
-      return contents + '\n]';
+      return new SerializedTerm(contents + '\n]');
     }
   },
 
@@ -2705,7 +2937,7 @@ N3Writer.prototype = {
     var length = elements && elements.length || 0, contents = new Array(length);
     for (var i = 0; i < length; i++)
       contents[i] = this._encodeObject(elements[i]);
-    return '(' + contents.join(' ') + ')';
+    return new SerializedTerm('(' + contents.join(' ') + ')');
   },
 
   // ### `_prefixRegex` matches a prefixed name or IRI that begins with one of the added prefixes
@@ -2713,9 +2945,9 @@ N3Writer.prototype = {
 
   // ### `end` signals the end of the output stream
   end: function (done) {
-    // Finish a possible pending triple
+    // Finish a possible pending quad
     if (this._subject !== null) {
-      this._write(this._graph ? '\n}\n' : '.\n');
+      this._write(this._inDefaultGraph ? '.\n' : '\n}\n');
       this._subject = null;
     }
     // Disallow further writing
@@ -2751,10 +2983,20 @@ function characterReplacer(character) {
   return result;
 }
 
+// ## Placeholder class to represent already pretty-printed terms
+function SerializedTerm(value) {
+  this.id = value;
+}
+DataFactory.internal.Term.subclass(SerializedTerm);
+
+// Pretty-printed nodes are not equal to any other node
+// (e.g., [] does not equal [])
+SerializedTerm.prototype.equals = function () { return false; };
+
 // ## Exports
 module.exports = N3Writer;
 
-},{}],10:[function(require,module,exports){
+},{"./IRIs":3,"./N3DataFactory":4}],12:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -2771,68 +3013,102 @@ for (var i = 0, len = code.length; i < len; ++i) {
   revLookup[code.charCodeAt(i)] = i
 }
 
+// Support decoding URL-safe base64 strings, as Node.js does.
+// See: https://en.wikipedia.org/wiki/Base64#URL_applications
 revLookup['-'.charCodeAt(0)] = 62
 revLookup['_'.charCodeAt(0)] = 63
 
-function placeHoldersCount (b64) {
+function getLens (b64) {
   var len = b64.length
+
   if (len % 4 > 0) {
     throw new Error('Invalid string. Length must be a multiple of 4')
   }
 
-  // the number of equal signs (place holders)
-  // if there are two placeholders, than the two characters before it
-  // represent one byte
-  // if there is only one, then the three characters before it represent 2 bytes
-  // this is just a cheap hack to not do indexOf twice
-  return b64[len - 2] === '=' ? 2 : b64[len - 1] === '=' ? 1 : 0
+  // Trim off extra bytes after placeholder bytes are found
+  // See: https://github.com/beatgammit/base64-js/issues/42
+  var validLen = b64.indexOf('=')
+  if (validLen === -1) validLen = len
+
+  var placeHoldersLen = validLen === len
+    ? 0
+    : 4 - (validLen % 4)
+
+  return [validLen, placeHoldersLen]
 }
 
+// base64 is 4/3 + up to two characters of the original data
 function byteLength (b64) {
-  // base64 is 4/3 + up to two characters of the original data
-  return b64.length * 3 / 4 - placeHoldersCount(b64)
+  var lens = getLens(b64)
+  var validLen = lens[0]
+  var placeHoldersLen = lens[1]
+  return ((validLen + placeHoldersLen) * 3 / 4) - placeHoldersLen
+}
+
+function _byteLength (b64, validLen, placeHoldersLen) {
+  return ((validLen + placeHoldersLen) * 3 / 4) - placeHoldersLen
 }
 
 function toByteArray (b64) {
-  var i, j, l, tmp, placeHolders, arr
-  var len = b64.length
-  placeHolders = placeHoldersCount(b64)
+  var tmp
+  var lens = getLens(b64)
+  var validLen = lens[0]
+  var placeHoldersLen = lens[1]
 
-  arr = new Arr(len * 3 / 4 - placeHolders)
+  var arr = new Arr(_byteLength(b64, validLen, placeHoldersLen))
+
+  var curByte = 0
 
   // if there are placeholders, only get up to the last complete 4 chars
-  l = placeHolders > 0 ? len - 4 : len
+  var len = placeHoldersLen > 0
+    ? validLen - 4
+    : validLen
 
-  var L = 0
-
-  for (i = 0, j = 0; i < l; i += 4, j += 3) {
-    tmp = (revLookup[b64.charCodeAt(i)] << 18) | (revLookup[b64.charCodeAt(i + 1)] << 12) | (revLookup[b64.charCodeAt(i + 2)] << 6) | revLookup[b64.charCodeAt(i + 3)]
-    arr[L++] = (tmp >> 16) & 0xFF
-    arr[L++] = (tmp >> 8) & 0xFF
-    arr[L++] = tmp & 0xFF
+  for (var i = 0; i < len; i += 4) {
+    tmp =
+      (revLookup[b64.charCodeAt(i)] << 18) |
+      (revLookup[b64.charCodeAt(i + 1)] << 12) |
+      (revLookup[b64.charCodeAt(i + 2)] << 6) |
+      revLookup[b64.charCodeAt(i + 3)]
+    arr[curByte++] = (tmp >> 16) & 0xFF
+    arr[curByte++] = (tmp >> 8) & 0xFF
+    arr[curByte++] = tmp & 0xFF
   }
 
-  if (placeHolders === 2) {
-    tmp = (revLookup[b64.charCodeAt(i)] << 2) | (revLookup[b64.charCodeAt(i + 1)] >> 4)
-    arr[L++] = tmp & 0xFF
-  } else if (placeHolders === 1) {
-    tmp = (revLookup[b64.charCodeAt(i)] << 10) | (revLookup[b64.charCodeAt(i + 1)] << 4) | (revLookup[b64.charCodeAt(i + 2)] >> 2)
-    arr[L++] = (tmp >> 8) & 0xFF
-    arr[L++] = tmp & 0xFF
+  if (placeHoldersLen === 2) {
+    tmp =
+      (revLookup[b64.charCodeAt(i)] << 2) |
+      (revLookup[b64.charCodeAt(i + 1)] >> 4)
+    arr[curByte++] = tmp & 0xFF
+  }
+
+  if (placeHoldersLen === 1) {
+    tmp =
+      (revLookup[b64.charCodeAt(i)] << 10) |
+      (revLookup[b64.charCodeAt(i + 1)] << 4) |
+      (revLookup[b64.charCodeAt(i + 2)] >> 2)
+    arr[curByte++] = (tmp >> 8) & 0xFF
+    arr[curByte++] = tmp & 0xFF
   }
 
   return arr
 }
 
 function tripletToBase64 (num) {
-  return lookup[num >> 18 & 0x3F] + lookup[num >> 12 & 0x3F] + lookup[num >> 6 & 0x3F] + lookup[num & 0x3F]
+  return lookup[num >> 18 & 0x3F] +
+    lookup[num >> 12 & 0x3F] +
+    lookup[num >> 6 & 0x3F] +
+    lookup[num & 0x3F]
 }
 
 function encodeChunk (uint8, start, end) {
   var tmp
   var output = []
   for (var i = start; i < end; i += 3) {
-    tmp = (uint8[i] << 16) + (uint8[i + 1] << 8) + (uint8[i + 2])
+    tmp =
+      ((uint8[i] << 16) & 0xFF0000) +
+      ((uint8[i + 1] << 8) & 0xFF00) +
+      (uint8[i + 2] & 0xFF)
     output.push(tripletToBase64(tmp))
   }
   return output.join('')
@@ -2842,153 +3118,44 @@ function fromByteArray (uint8) {
   var tmp
   var len = uint8.length
   var extraBytes = len % 3 // if we have 1 byte left, pad 2 bytes
-  var output = ''
   var parts = []
   var maxChunkLength = 16383 // must be multiple of 3
 
   // go through the array every three bytes, we'll deal with trailing stuff later
   for (var i = 0, len2 = len - extraBytes; i < len2; i += maxChunkLength) {
-    parts.push(encodeChunk(uint8, i, (i + maxChunkLength) > len2 ? len2 : (i + maxChunkLength)))
+    parts.push(encodeChunk(
+      uint8, i, (i + maxChunkLength) > len2 ? len2 : (i + maxChunkLength)
+    ))
   }
 
   // pad the end with zeros, but make sure to not forget the extra bytes
   if (extraBytes === 1) {
     tmp = uint8[len - 1]
-    output += lookup[tmp >> 2]
-    output += lookup[(tmp << 4) & 0x3F]
-    output += '=='
+    parts.push(
+      lookup[tmp >> 2] +
+      lookup[(tmp << 4) & 0x3F] +
+      '=='
+    )
   } else if (extraBytes === 2) {
-    tmp = (uint8[len - 2] << 8) + (uint8[len - 1])
-    output += lookup[tmp >> 10]
-    output += lookup[(tmp >> 4) & 0x3F]
-    output += lookup[(tmp << 2) & 0x3F]
-    output += '='
+    tmp = (uint8[len - 2] << 8) + uint8[len - 1]
+    parts.push(
+      lookup[tmp >> 10] +
+      lookup[(tmp >> 4) & 0x3F] +
+      lookup[(tmp << 2) & 0x3F] +
+      '='
+    )
   }
-
-  parts.push(output)
 
   return parts.join('')
 }
 
-},{}],11:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 
-},{}],12:[function(require,module,exports){
-(function (global){
-'use strict';
-
-var buffer = require('buffer');
-var Buffer = buffer.Buffer;
-var SlowBuffer = buffer.SlowBuffer;
-var MAX_LEN = buffer.kMaxLength || 2147483647;
-exports.alloc = function alloc(size, fill, encoding) {
-  if (typeof Buffer.alloc === 'function') {
-    return Buffer.alloc(size, fill, encoding);
-  }
-  if (typeof encoding === 'number') {
-    throw new TypeError('encoding must not be number');
-  }
-  if (typeof size !== 'number') {
-    throw new TypeError('size must be a number');
-  }
-  if (size > MAX_LEN) {
-    throw new RangeError('size is too large');
-  }
-  var enc = encoding;
-  var _fill = fill;
-  if (_fill === undefined) {
-    enc = undefined;
-    _fill = 0;
-  }
-  var buf = new Buffer(size);
-  if (typeof _fill === 'string') {
-    var fillBuf = new Buffer(_fill, enc);
-    var flen = fillBuf.length;
-    var i = -1;
-    while (++i < size) {
-      buf[i] = fillBuf[i % flen];
-    }
-  } else {
-    buf.fill(_fill);
-  }
-  return buf;
-}
-exports.allocUnsafe = function allocUnsafe(size) {
-  if (typeof Buffer.allocUnsafe === 'function') {
-    return Buffer.allocUnsafe(size);
-  }
-  if (typeof size !== 'number') {
-    throw new TypeError('size must be a number');
-  }
-  if (size > MAX_LEN) {
-    throw new RangeError('size is too large');
-  }
-  return new Buffer(size);
-}
-exports.from = function from(value, encodingOrOffset, length) {
-  if (typeof Buffer.from === 'function' && (!global.Uint8Array || Uint8Array.from !== Buffer.from)) {
-    return Buffer.from(value, encodingOrOffset, length);
-  }
-  if (typeof value === 'number') {
-    throw new TypeError('"value" argument must not be a number');
-  }
-  if (typeof value === 'string') {
-    return new Buffer(value, encodingOrOffset);
-  }
-  if (typeof ArrayBuffer !== 'undefined' && value instanceof ArrayBuffer) {
-    var offset = encodingOrOffset;
-    if (arguments.length === 1) {
-      return new Buffer(value);
-    }
-    if (typeof offset === 'undefined') {
-      offset = 0;
-    }
-    var len = length;
-    if (typeof len === 'undefined') {
-      len = value.byteLength - offset;
-    }
-    if (offset >= value.byteLength) {
-      throw new RangeError('\'offset\' is out of bounds');
-    }
-    if (len > value.byteLength - offset) {
-      throw new RangeError('\'length\' is out of bounds');
-    }
-    return new Buffer(value.slice(offset, offset + len));
-  }
-  if (Buffer.isBuffer(value)) {
-    var out = new Buffer(value.length);
-    value.copy(out, 0, 0, value.length);
-    return out;
-  }
-  if (value) {
-    if (Array.isArray(value) || (typeof ArrayBuffer !== 'undefined' && value.buffer instanceof ArrayBuffer) || 'length' in value) {
-      return new Buffer(value);
-    }
-    if (value.type === 'Buffer' && Array.isArray(value.data)) {
-      return new Buffer(value.data);
-    }
-  }
-
-  throw new TypeError('First argument must be a string, Buffer, ' + 'ArrayBuffer, Array, or array-like object.');
-}
-exports.allocUnsafeSlow = function allocUnsafeSlow(size) {
-  if (typeof Buffer.allocUnsafeSlow === 'function') {
-    return Buffer.allocUnsafeSlow(size);
-  }
-  if (typeof size !== 'number') {
-    throw new TypeError('size must be a number');
-  }
-  if (size >= MAX_LEN) {
-    throw new RangeError('size is too large');
-  }
-  return new SlowBuffer(size);
-}
-
-}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"buffer":13}],13:[function(require,module,exports){
+},{}],14:[function(require,module,exports){
 /*!
  * The buffer module from node.js, for the browser.
  *
- * @author   Feross Aboukhadijeh <feross@feross.org> <http://feross.org>
+ * @author   Feross Aboukhadijeh <https://feross.org>
  * @license  MIT
  */
 /* eslint-disable no-proto */
@@ -3033,16 +3200,32 @@ function typedArraySupport () {
   // Can typed array instances can be augmented?
   try {
     var arr = new Uint8Array(1)
-    arr.__proto__ = {__proto__: Uint8Array.prototype, foo: function () { return 42 }}
+    arr.__proto__ = { __proto__: Uint8Array.prototype, foo: function () { return 42 } }
     return arr.foo() === 42
   } catch (e) {
     return false
   }
 }
 
+Object.defineProperty(Buffer.prototype, 'parent', {
+  enumerable: true,
+  get: function () {
+    if (!Buffer.isBuffer(this)) return undefined
+    return this.buffer
+  }
+})
+
+Object.defineProperty(Buffer.prototype, 'offset', {
+  enumerable: true,
+  get: function () {
+    if (!Buffer.isBuffer(this)) return undefined
+    return this.byteOffset
+  }
+})
+
 function createBuffer (length) {
   if (length > K_MAX_LENGTH) {
-    throw new RangeError('Invalid typed array length')
+    throw new RangeError('The value "' + length + '" is invalid for option "size"')
   }
   // Return an augmented `Uint8Array` instance
   var buf = new Uint8Array(length)
@@ -3064,8 +3247,8 @@ function Buffer (arg, encodingOrOffset, length) {
   // Common case.
   if (typeof arg === 'number') {
     if (typeof encodingOrOffset === 'string') {
-      throw new Error(
-        'If encoding is specified then the first argument must be a string'
+      throw new TypeError(
+        'The "string" argument must be of type string. Received type number'
       )
     }
     return allocUnsafe(arg)
@@ -3074,7 +3257,7 @@ function Buffer (arg, encodingOrOffset, length) {
 }
 
 // Fix subarray() in ES2016. See: https://github.com/feross/buffer/pull/97
-if (typeof Symbol !== 'undefined' && Symbol.species &&
+if (typeof Symbol !== 'undefined' && Symbol.species != null &&
     Buffer[Symbol.species] === Buffer) {
   Object.defineProperty(Buffer, Symbol.species, {
     value: null,
@@ -3087,19 +3270,51 @@ if (typeof Symbol !== 'undefined' && Symbol.species &&
 Buffer.poolSize = 8192 // not used by this implementation
 
 function from (value, encodingOrOffset, length) {
-  if (typeof value === 'number') {
-    throw new TypeError('"value" argument must not be a number')
-  }
-
-  if (value instanceof ArrayBuffer) {
-    return fromArrayBuffer(value, encodingOrOffset, length)
-  }
-
   if (typeof value === 'string') {
     return fromString(value, encodingOrOffset)
   }
 
-  return fromObject(value)
+  if (ArrayBuffer.isView(value)) {
+    return fromArrayLike(value)
+  }
+
+  if (value == null) {
+    throw TypeError(
+      'The first argument must be one of type string, Buffer, ArrayBuffer, Array, ' +
+      'or Array-like Object. Received type ' + (typeof value)
+    )
+  }
+
+  if (isInstance(value, ArrayBuffer) ||
+      (value && isInstance(value.buffer, ArrayBuffer))) {
+    return fromArrayBuffer(value, encodingOrOffset, length)
+  }
+
+  if (typeof value === 'number') {
+    throw new TypeError(
+      'The "value" argument must not be of type number. Received type number'
+    )
+  }
+
+  var valueOf = value.valueOf && value.valueOf()
+  if (valueOf != null && valueOf !== value) {
+    return Buffer.from(valueOf, encodingOrOffset, length)
+  }
+
+  var b = fromObject(value)
+  if (b) return b
+
+  if (typeof Symbol !== 'undefined' && Symbol.toPrimitive != null &&
+      typeof value[Symbol.toPrimitive] === 'function') {
+    return Buffer.from(
+      value[Symbol.toPrimitive]('string'), encodingOrOffset, length
+    )
+  }
+
+  throw new TypeError(
+    'The first argument must be one of type string, Buffer, ArrayBuffer, Array, ' +
+    'or Array-like Object. Received type ' + (typeof value)
+  )
 }
 
 /**
@@ -3121,9 +3336,9 @@ Buffer.__proto__ = Uint8Array
 
 function assertSize (size) {
   if (typeof size !== 'number') {
-    throw new TypeError('"size" argument must be a number')
+    throw new TypeError('"size" argument must be of type number')
   } else if (size < 0) {
-    throw new RangeError('"size" argument must not be negative')
+    throw new RangeError('The value "' + size + '" is invalid for option "size"')
   }
 }
 
@@ -3175,7 +3390,7 @@ function fromString (string, encoding) {
   }
 
   if (!Buffer.isEncoding(encoding)) {
-    throw new TypeError('"encoding" must be a valid string encoding')
+    throw new TypeError('Unknown encoding: ' + encoding)
   }
 
   var length = byteLength(string, encoding) | 0
@@ -3204,11 +3419,11 @@ function fromArrayLike (array) {
 
 function fromArrayBuffer (array, byteOffset, length) {
   if (byteOffset < 0 || array.byteLength < byteOffset) {
-    throw new RangeError('\'offset\' is out of bounds')
+    throw new RangeError('"offset" is outside of buffer bounds')
   }
 
   if (array.byteLength < byteOffset + (length || 0)) {
-    throw new RangeError('\'length\' is out of bounds')
+    throw new RangeError('"length" is outside of buffer bounds')
   }
 
   var buf
@@ -3238,20 +3453,16 @@ function fromObject (obj) {
     return buf
   }
 
-  if (obj) {
-    if (ArrayBuffer.isView(obj) || 'length' in obj) {
-      if (typeof obj.length !== 'number' || isnan(obj.length)) {
-        return createBuffer(0)
-      }
-      return fromArrayLike(obj)
+  if (obj.length !== undefined) {
+    if (typeof obj.length !== 'number' || numberIsNaN(obj.length)) {
+      return createBuffer(0)
     }
-
-    if (obj.type === 'Buffer' && Array.isArray(obj.data)) {
-      return fromArrayLike(obj.data)
-    }
+    return fromArrayLike(obj)
   }
 
-  throw new TypeError('First argument must be a string, Buffer, ArrayBuffer, Array, or array-like object.')
+  if (obj.type === 'Buffer' && Array.isArray(obj.data)) {
+    return fromArrayLike(obj.data)
+  }
 }
 
 function checked (length) {
@@ -3272,12 +3483,17 @@ function SlowBuffer (length) {
 }
 
 Buffer.isBuffer = function isBuffer (b) {
-  return b != null && b._isBuffer === true
+  return b != null && b._isBuffer === true &&
+    b !== Buffer.prototype // so Buffer.isBuffer(Buffer.prototype) will be false
 }
 
 Buffer.compare = function compare (a, b) {
+  if (isInstance(a, Uint8Array)) a = Buffer.from(a, a.offset, a.byteLength)
+  if (isInstance(b, Uint8Array)) b = Buffer.from(b, b.offset, b.byteLength)
   if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) {
-    throw new TypeError('Arguments must be Buffers')
+    throw new TypeError(
+      'The "buf1", "buf2" arguments must be one of type Buffer or Uint8Array'
+    )
   }
 
   if (a === b) return 0
@@ -3338,6 +3554,9 @@ Buffer.concat = function concat (list, length) {
   var pos = 0
   for (i = 0; i < list.length; ++i) {
     var buf = list[i]
+    if (isInstance(buf, Uint8Array)) {
+      buf = Buffer.from(buf)
+    }
     if (!Buffer.isBuffer(buf)) {
       throw new TypeError('"list" argument must be an Array of Buffers')
     }
@@ -3351,15 +3570,19 @@ function byteLength (string, encoding) {
   if (Buffer.isBuffer(string)) {
     return string.length
   }
-  if (ArrayBuffer.isView(string) || string instanceof ArrayBuffer) {
+  if (ArrayBuffer.isView(string) || isInstance(string, ArrayBuffer)) {
     return string.byteLength
   }
   if (typeof string !== 'string') {
-    string = '' + string
+    throw new TypeError(
+      'The "string" argument must be one of type string, Buffer, or ArrayBuffer. ' +
+      'Received type ' + typeof string
+    )
   }
 
   var len = string.length
-  if (len === 0) return 0
+  var mustMatch = (arguments.length > 2 && arguments[2] === true)
+  if (!mustMatch && len === 0) return 0
 
   // Use a for loop to avoid recursion
   var loweredCase = false
@@ -3371,7 +3594,6 @@ function byteLength (string, encoding) {
         return len
       case 'utf8':
       case 'utf-8':
-      case undefined:
         return utf8ToBytes(string).length
       case 'ucs2':
       case 'ucs-2':
@@ -3383,7 +3605,9 @@ function byteLength (string, encoding) {
       case 'base64':
         return base64ToBytes(string).length
       default:
-        if (loweredCase) return utf8ToBytes(string).length // assume utf8
+        if (loweredCase) {
+          return mustMatch ? -1 : utf8ToBytes(string).length // assume utf8
+        }
         encoding = ('' + encoding).toLowerCase()
         loweredCase = true
     }
@@ -3519,6 +3743,8 @@ Buffer.prototype.toString = function toString () {
   return slowToString.apply(this, arguments)
 }
 
+Buffer.prototype.toLocaleString = Buffer.prototype.toString
+
 Buffer.prototype.equals = function equals (b) {
   if (!Buffer.isBuffer(b)) throw new TypeError('Argument must be a Buffer')
   if (this === b) return true
@@ -3528,16 +3754,20 @@ Buffer.prototype.equals = function equals (b) {
 Buffer.prototype.inspect = function inspect () {
   var str = ''
   var max = exports.INSPECT_MAX_BYTES
-  if (this.length > 0) {
-    str = this.toString('hex', 0, max).match(/.{2}/g).join(' ')
-    if (this.length > max) str += ' ... '
-  }
+  str = this.toString('hex', 0, max).replace(/(.{2})/g, '$1 ').trim()
+  if (this.length > max) str += ' ... '
   return '<Buffer ' + str + '>'
 }
 
 Buffer.prototype.compare = function compare (target, start, end, thisStart, thisEnd) {
+  if (isInstance(target, Uint8Array)) {
+    target = Buffer.from(target, target.offset, target.byteLength)
+  }
   if (!Buffer.isBuffer(target)) {
-    throw new TypeError('Argument must be a Buffer')
+    throw new TypeError(
+      'The "target" argument must be one of type Buffer or Uint8Array. ' +
+      'Received type ' + (typeof target)
+    )
   }
 
   if (start === undefined) {
@@ -3616,8 +3846,8 @@ function bidirectionalIndexOf (buffer, val, byteOffset, encoding, dir) {
   } else if (byteOffset < -0x80000000) {
     byteOffset = -0x80000000
   }
-  byteOffset = +byteOffset  // Coerce to Number.
-  if (isNaN(byteOffset)) {
+  byteOffset = +byteOffset // Coerce to Number.
+  if (numberIsNaN(byteOffset)) {
     // byteOffset: it it's undefined, null, NaN, "foo", etc, search whole buffer
     byteOffset = dir ? 0 : (buffer.length - 1)
   }
@@ -3739,16 +3969,14 @@ function hexWrite (buf, string, offset, length) {
     }
   }
 
-  // must be an even number of digits
   var strLen = string.length
-  if (strLen % 2 !== 0) throw new TypeError('Invalid hex string')
 
   if (length > strLen / 2) {
     length = strLen / 2
   }
   for (var i = 0; i < length; ++i) {
     var parsed = parseInt(string.substr(i * 2, 2), 16)
-    if (isNaN(parsed)) return i
+    if (numberIsNaN(parsed)) return i
     buf[offset + i] = parsed
   }
   return i
@@ -3870,8 +4098,8 @@ function utf8Slice (buf, start, end) {
     var codePoint = null
     var bytesPerSequence = (firstByte > 0xEF) ? 4
       : (firstByte > 0xDF) ? 3
-      : (firstByte > 0xBF) ? 2
-      : 1
+        : (firstByte > 0xBF) ? 2
+          : 1
 
     if (i + bytesPerSequence <= end) {
       var secondByte, thirdByte, fourthByte, tempCodePoint
@@ -4434,6 +4662,7 @@ Buffer.prototype.writeDoubleBE = function writeDoubleBE (value, offset, noAssert
 
 // copy(targetBuffer, targetStart=0, sourceStart=0, sourceEnd=buffer.length)
 Buffer.prototype.copy = function copy (target, targetStart, start, end) {
+  if (!Buffer.isBuffer(target)) throw new TypeError('argument should be a Buffer')
   if (!start) start = 0
   if (!end && end !== 0) end = this.length
   if (targetStart >= target.length) targetStart = target.length
@@ -4448,7 +4677,7 @@ Buffer.prototype.copy = function copy (target, targetStart, start, end) {
   if (targetStart < 0) {
     throw new RangeError('targetStart out of bounds')
   }
-  if (start < 0 || start >= this.length) throw new RangeError('sourceStart out of bounds')
+  if (start < 0 || start >= this.length) throw new RangeError('Index out of range')
   if (end < 0) throw new RangeError('sourceEnd out of bounds')
 
   // Are we oob?
@@ -4458,22 +4687,19 @@ Buffer.prototype.copy = function copy (target, targetStart, start, end) {
   }
 
   var len = end - start
-  var i
 
-  if (this === target && start < targetStart && targetStart < end) {
+  if (this === target && typeof Uint8Array.prototype.copyWithin === 'function') {
+    // Use built-in when available, missing from IE11
+    this.copyWithin(targetStart, start, end)
+  } else if (this === target && start < targetStart && targetStart < end) {
     // descending copy from end
-    for (i = len - 1; i >= 0; --i) {
-      target[i + targetStart] = this[i + start]
-    }
-  } else if (len < 1000) {
-    // ascending copy from start
-    for (i = 0; i < len; ++i) {
+    for (var i = len - 1; i >= 0; --i) {
       target[i + targetStart] = this[i + start]
     }
   } else {
     Uint8Array.prototype.set.call(
       target,
-      this.subarray(start, start + len),
+      this.subarray(start, end),
       targetStart
     )
   }
@@ -4496,17 +4722,19 @@ Buffer.prototype.fill = function fill (val, start, end, encoding) {
       encoding = end
       end = this.length
     }
-    if (val.length === 1) {
-      var code = val.charCodeAt(0)
-      if (code < 256) {
-        val = code
-      }
-    }
     if (encoding !== undefined && typeof encoding !== 'string') {
       throw new TypeError('encoding must be a string')
     }
     if (typeof encoding === 'string' && !Buffer.isEncoding(encoding)) {
       throw new TypeError('Unknown encoding: ' + encoding)
+    }
+    if (val.length === 1) {
+      var code = val.charCodeAt(0)
+      if ((encoding === 'utf8' && code < 128) ||
+          encoding === 'latin1') {
+        // Fast path: If `val` fits into a single byte, use that numeric value.
+        val = code
+      }
     }
   } else if (typeof val === 'number') {
     val = val & 255
@@ -4534,8 +4762,12 @@ Buffer.prototype.fill = function fill (val, start, end, encoding) {
   } else {
     var bytes = Buffer.isBuffer(val)
       ? val
-      : new Buffer(val, encoding)
+      : Buffer.from(val, encoding)
     var len = bytes.length
+    if (len === 0) {
+      throw new TypeError('The value "' + val +
+        '" is invalid for argument "value"')
+    }
     for (i = 0; i < end - start; ++i) {
       this[i + start] = bytes[i % len]
     }
@@ -4550,8 +4782,10 @@ Buffer.prototype.fill = function fill (val, start, end, encoding) {
 var INVALID_BASE64_RE = /[^+/0-9A-Za-z-_]/g
 
 function base64clean (str) {
+  // Node takes equal signs as end of the Base64 encoding
+  str = str.split('=')[0]
   // Node strips out invalid characters like \n and \t from the string, base64-js does not
-  str = stringtrim(str).replace(INVALID_BASE64_RE, '')
+  str = str.trim().replace(INVALID_BASE64_RE, '')
   // Node converts strings with length < 2 to ''
   if (str.length < 2) return ''
   // Node allows for non-padded base64 strings (missing trailing ===), base64-js does not
@@ -4559,11 +4793,6 @@ function base64clean (str) {
     str = str + '='
   }
   return str
-}
-
-function stringtrim (str) {
-  if (str.trim) return str.trim()
-  return str.replace(/^\s+|\s+$/g, '')
 }
 
 function toHex (n) {
@@ -4688,11 +4917,20 @@ function blitBuffer (src, dst, offset, length) {
   return i
 }
 
-function isnan (val) {
-  return val !== val // eslint-disable-line no-self-compare
+// ArrayBuffer or Uint8Array objects from other contexts (i.e. iframes) do not pass
+// the `instanceof` check but they should be treated as of that type.
+// See: https://github.com/feross/buffer/issues/166
+function isInstance (obj, type) {
+  return obj instanceof type ||
+    (obj != null && obj.constructor != null && obj.constructor.name != null &&
+      obj.constructor.name === type.name)
+}
+function numberIsNaN (obj) {
+  // For IE11 support
+  return obj !== obj // eslint-disable-line no-self-compare
 }
 
-},{"base64-js":10,"ieee754":16}],14:[function(require,module,exports){
+},{"base64-js":12,"ieee754":17}],15:[function(require,module,exports){
 (function (Buffer){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -4803,7 +5041,7 @@ function objectToString(o) {
 }
 
 }).call(this,{"isBuffer":require("../../is-buffer/index.js")})
-},{"../../is-buffer/index.js":18}],15:[function(require,module,exports){
+},{"../../is-buffer/index.js":19}],16:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -4825,8 +5063,16 @@ function objectToString(o) {
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+var objectCreate = Object.create || objectCreatePolyfill
+var objectKeys = Object.keys || objectKeysPolyfill
+var bind = Function.prototype.bind || functionBindPolyfill
+
 function EventEmitter() {
-  this._events = this._events || {};
+  if (!this._events || !Object.prototype.hasOwnProperty.call(this, '_events')) {
+    this._events = objectCreate(null);
+    this._eventsCount = 0;
+  }
+
   this._maxListeners = this._maxListeners || undefined;
 }
 module.exports = EventEmitter;
@@ -4839,278 +5085,491 @@ EventEmitter.prototype._maxListeners = undefined;
 
 // By default EventEmitters will print a warning if more than 10 listeners are
 // added to it. This is a useful default which helps finding memory leaks.
-EventEmitter.defaultMaxListeners = 10;
+var defaultMaxListeners = 10;
+
+var hasDefineProperty;
+try {
+  var o = {};
+  if (Object.defineProperty) Object.defineProperty(o, 'x', { value: 0 });
+  hasDefineProperty = o.x === 0;
+} catch (err) { hasDefineProperty = false }
+if (hasDefineProperty) {
+  Object.defineProperty(EventEmitter, 'defaultMaxListeners', {
+    enumerable: true,
+    get: function() {
+      return defaultMaxListeners;
+    },
+    set: function(arg) {
+      // check whether the input is a positive number (whose value is zero or
+      // greater and not a NaN).
+      if (typeof arg !== 'number' || arg < 0 || arg !== arg)
+        throw new TypeError('"defaultMaxListeners" must be a positive number');
+      defaultMaxListeners = arg;
+    }
+  });
+} else {
+  EventEmitter.defaultMaxListeners = defaultMaxListeners;
+}
 
 // Obviously not all Emitters should be limited to 10. This function allows
 // that to be increased. Set to zero for unlimited.
-EventEmitter.prototype.setMaxListeners = function(n) {
-  if (!isNumber(n) || n < 0 || isNaN(n))
-    throw TypeError('n must be a positive number');
+EventEmitter.prototype.setMaxListeners = function setMaxListeners(n) {
+  if (typeof n !== 'number' || n < 0 || isNaN(n))
+    throw new TypeError('"n" argument must be a positive number');
   this._maxListeners = n;
   return this;
 };
 
-EventEmitter.prototype.emit = function(type) {
-  var er, handler, len, args, i, listeners;
+function $getMaxListeners(that) {
+  if (that._maxListeners === undefined)
+    return EventEmitter.defaultMaxListeners;
+  return that._maxListeners;
+}
 
-  if (!this._events)
-    this._events = {};
+EventEmitter.prototype.getMaxListeners = function getMaxListeners() {
+  return $getMaxListeners(this);
+};
 
-  // If there is no 'error' event listener then throw.
-  if (type === 'error') {
-    if (!this._events.error ||
-        (isObject(this._events.error) && !this._events.error.length)) {
-      er = arguments[1];
-      if (er instanceof Error) {
-        throw er; // Unhandled 'error' event
-      } else {
-        // At least give some kind of context to the user
-        var err = new Error('Uncaught, unspecified "error" event. (' + er + ')');
-        err.context = er;
-        throw err;
-      }
-    }
+// These standalone emit* functions are used to optimize calling of event
+// handlers for fast cases because emit() itself often has a variable number of
+// arguments and can be deoptimized because of that. These functions always have
+// the same number of arguments and thus do not get deoptimized, so the code
+// inside them can execute faster.
+function emitNone(handler, isFn, self) {
+  if (isFn)
+    handler.call(self);
+  else {
+    var len = handler.length;
+    var listeners = arrayClone(handler, len);
+    for (var i = 0; i < len; ++i)
+      listeners[i].call(self);
   }
+}
+function emitOne(handler, isFn, self, arg1) {
+  if (isFn)
+    handler.call(self, arg1);
+  else {
+    var len = handler.length;
+    var listeners = arrayClone(handler, len);
+    for (var i = 0; i < len; ++i)
+      listeners[i].call(self, arg1);
+  }
+}
+function emitTwo(handler, isFn, self, arg1, arg2) {
+  if (isFn)
+    handler.call(self, arg1, arg2);
+  else {
+    var len = handler.length;
+    var listeners = arrayClone(handler, len);
+    for (var i = 0; i < len; ++i)
+      listeners[i].call(self, arg1, arg2);
+  }
+}
+function emitThree(handler, isFn, self, arg1, arg2, arg3) {
+  if (isFn)
+    handler.call(self, arg1, arg2, arg3);
+  else {
+    var len = handler.length;
+    var listeners = arrayClone(handler, len);
+    for (var i = 0; i < len; ++i)
+      listeners[i].call(self, arg1, arg2, arg3);
+  }
+}
 
-  handler = this._events[type];
+function emitMany(handler, isFn, self, args) {
+  if (isFn)
+    handler.apply(self, args);
+  else {
+    var len = handler.length;
+    var listeners = arrayClone(handler, len);
+    for (var i = 0; i < len; ++i)
+      listeners[i].apply(self, args);
+  }
+}
 
-  if (isUndefined(handler))
+EventEmitter.prototype.emit = function emit(type) {
+  var er, handler, len, args, i, events;
+  var doError = (type === 'error');
+
+  events = this._events;
+  if (events)
+    doError = (doError && events.error == null);
+  else if (!doError)
     return false;
 
-  if (isFunction(handler)) {
-    switch (arguments.length) {
-      // fast cases
-      case 1:
-        handler.call(this);
-        break;
-      case 2:
-        handler.call(this, arguments[1]);
-        break;
-      case 3:
-        handler.call(this, arguments[1], arguments[2]);
-        break;
-      // slower
-      default:
-        args = Array.prototype.slice.call(arguments, 1);
-        handler.apply(this, args);
+  // If there is no 'error' event listener then throw.
+  if (doError) {
+    if (arguments.length > 1)
+      er = arguments[1];
+    if (er instanceof Error) {
+      throw er; // Unhandled 'error' event
+    } else {
+      // At least give some kind of context to the user
+      var err = new Error('Unhandled "error" event. (' + er + ')');
+      err.context = er;
+      throw err;
     }
-  } else if (isObject(handler)) {
-    args = Array.prototype.slice.call(arguments, 1);
-    listeners = handler.slice();
-    len = listeners.length;
-    for (i = 0; i < len; i++)
-      listeners[i].apply(this, args);
+    return false;
+  }
+
+  handler = events[type];
+
+  if (!handler)
+    return false;
+
+  var isFn = typeof handler === 'function';
+  len = arguments.length;
+  switch (len) {
+      // fast cases
+    case 1:
+      emitNone(handler, isFn, this);
+      break;
+    case 2:
+      emitOne(handler, isFn, this, arguments[1]);
+      break;
+    case 3:
+      emitTwo(handler, isFn, this, arguments[1], arguments[2]);
+      break;
+    case 4:
+      emitThree(handler, isFn, this, arguments[1], arguments[2], arguments[3]);
+      break;
+      // slower
+    default:
+      args = new Array(len - 1);
+      for (i = 1; i < len; i++)
+        args[i - 1] = arguments[i];
+      emitMany(handler, isFn, this, args);
   }
 
   return true;
 };
 
-EventEmitter.prototype.addListener = function(type, listener) {
+function _addListener(target, type, listener, prepend) {
   var m;
+  var events;
+  var existing;
 
-  if (!isFunction(listener))
-    throw TypeError('listener must be a function');
+  if (typeof listener !== 'function')
+    throw new TypeError('"listener" argument must be a function');
 
-  if (!this._events)
-    this._events = {};
+  events = target._events;
+  if (!events) {
+    events = target._events = objectCreate(null);
+    target._eventsCount = 0;
+  } else {
+    // To avoid recursion in the case that type === "newListener"! Before
+    // adding it to the listeners, first emit "newListener".
+    if (events.newListener) {
+      target.emit('newListener', type,
+          listener.listener ? listener.listener : listener);
 
-  // To avoid recursion in the case that type === "newListener"! Before
-  // adding it to the listeners, first emit "newListener".
-  if (this._events.newListener)
-    this.emit('newListener', type,
-              isFunction(listener.listener) ?
-              listener.listener : listener);
+      // Re-assign `events` because a newListener handler could have caused the
+      // this._events to be assigned to a new object
+      events = target._events;
+    }
+    existing = events[type];
+  }
 
-  if (!this._events[type])
+  if (!existing) {
     // Optimize the case of one listener. Don't need the extra array object.
-    this._events[type] = listener;
-  else if (isObject(this._events[type]))
-    // If we've already got an array, just append.
-    this._events[type].push(listener);
-  else
-    // Adding the second element, need to change to array.
-    this._events[type] = [this._events[type], listener];
-
-  // Check for listener leak
-  if (isObject(this._events[type]) && !this._events[type].warned) {
-    if (!isUndefined(this._maxListeners)) {
-      m = this._maxListeners;
+    existing = events[type] = listener;
+    ++target._eventsCount;
+  } else {
+    if (typeof existing === 'function') {
+      // Adding the second element, need to change to array.
+      existing = events[type] =
+          prepend ? [listener, existing] : [existing, listener];
     } else {
-      m = EventEmitter.defaultMaxListeners;
+      // If we've already got an array, just append.
+      if (prepend) {
+        existing.unshift(listener);
+      } else {
+        existing.push(listener);
+      }
     }
 
-    if (m && m > 0 && this._events[type].length > m) {
-      this._events[type].warned = true;
-      console.error('(node) warning: possible EventEmitter memory ' +
-                    'leak detected. %d listeners added. ' +
-                    'Use emitter.setMaxListeners() to increase limit.',
-                    this._events[type].length);
-      if (typeof console.trace === 'function') {
-        // not supported in IE 10
-        console.trace();
+    // Check for listener leak
+    if (!existing.warned) {
+      m = $getMaxListeners(target);
+      if (m && m > 0 && existing.length > m) {
+        existing.warned = true;
+        var w = new Error('Possible EventEmitter memory leak detected. ' +
+            existing.length + ' "' + String(type) + '" listeners ' +
+            'added. Use emitter.setMaxListeners() to ' +
+            'increase limit.');
+        w.name = 'MaxListenersExceededWarning';
+        w.emitter = target;
+        w.type = type;
+        w.count = existing.length;
+        if (typeof console === 'object' && console.warn) {
+          console.warn('%s: %s', w.name, w.message);
+        }
       }
     }
   }
 
-  return this;
+  return target;
+}
+
+EventEmitter.prototype.addListener = function addListener(type, listener) {
+  return _addListener(this, type, listener, false);
 };
 
 EventEmitter.prototype.on = EventEmitter.prototype.addListener;
 
-EventEmitter.prototype.once = function(type, listener) {
-  if (!isFunction(listener))
-    throw TypeError('listener must be a function');
+EventEmitter.prototype.prependListener =
+    function prependListener(type, listener) {
+      return _addListener(this, type, listener, true);
+    };
 
-  var fired = false;
-
-  function g() {
-    this.removeListener(type, g);
-
-    if (!fired) {
-      fired = true;
-      listener.apply(this, arguments);
+function onceWrapper() {
+  if (!this.fired) {
+    this.target.removeListener(this.type, this.wrapFn);
+    this.fired = true;
+    switch (arguments.length) {
+      case 0:
+        return this.listener.call(this.target);
+      case 1:
+        return this.listener.call(this.target, arguments[0]);
+      case 2:
+        return this.listener.call(this.target, arguments[0], arguments[1]);
+      case 3:
+        return this.listener.call(this.target, arguments[0], arguments[1],
+            arguments[2]);
+      default:
+        var args = new Array(arguments.length);
+        for (var i = 0; i < args.length; ++i)
+          args[i] = arguments[i];
+        this.listener.apply(this.target, args);
     }
   }
+}
 
-  g.listener = listener;
-  this.on(type, g);
+function _onceWrap(target, type, listener) {
+  var state = { fired: false, wrapFn: undefined, target: target, type: type, listener: listener };
+  var wrapped = bind.call(onceWrapper, state);
+  wrapped.listener = listener;
+  state.wrapFn = wrapped;
+  return wrapped;
+}
 
+EventEmitter.prototype.once = function once(type, listener) {
+  if (typeof listener !== 'function')
+    throw new TypeError('"listener" argument must be a function');
+  this.on(type, _onceWrap(this, type, listener));
   return this;
 };
 
-// emits a 'removeListener' event iff the listener was removed
-EventEmitter.prototype.removeListener = function(type, listener) {
-  var list, position, length, i;
-
-  if (!isFunction(listener))
-    throw TypeError('listener must be a function');
-
-  if (!this._events || !this._events[type])
-    return this;
-
-  list = this._events[type];
-  length = list.length;
-  position = -1;
-
-  if (list === listener ||
-      (isFunction(list.listener) && list.listener === listener)) {
-    delete this._events[type];
-    if (this._events.removeListener)
-      this.emit('removeListener', type, listener);
-
-  } else if (isObject(list)) {
-    for (i = length; i-- > 0;) {
-      if (list[i] === listener ||
-          (list[i].listener && list[i].listener === listener)) {
-        position = i;
-        break;
-      }
-    }
-
-    if (position < 0)
+EventEmitter.prototype.prependOnceListener =
+    function prependOnceListener(type, listener) {
+      if (typeof listener !== 'function')
+        throw new TypeError('"listener" argument must be a function');
+      this.prependListener(type, _onceWrap(this, type, listener));
       return this;
+    };
 
-    if (list.length === 1) {
-      list.length = 0;
-      delete this._events[type];
-    } else {
-      list.splice(position, 1);
-    }
+// Emits a 'removeListener' event if and only if the listener was removed.
+EventEmitter.prototype.removeListener =
+    function removeListener(type, listener) {
+      var list, events, position, i, originalListener;
 
-    if (this._events.removeListener)
-      this.emit('removeListener', type, listener);
-  }
+      if (typeof listener !== 'function')
+        throw new TypeError('"listener" argument must be a function');
 
-  return this;
+      events = this._events;
+      if (!events)
+        return this;
+
+      list = events[type];
+      if (!list)
+        return this;
+
+      if (list === listener || list.listener === listener) {
+        if (--this._eventsCount === 0)
+          this._events = objectCreate(null);
+        else {
+          delete events[type];
+          if (events.removeListener)
+            this.emit('removeListener', type, list.listener || listener);
+        }
+      } else if (typeof list !== 'function') {
+        position = -1;
+
+        for (i = list.length - 1; i >= 0; i--) {
+          if (list[i] === listener || list[i].listener === listener) {
+            originalListener = list[i].listener;
+            position = i;
+            break;
+          }
+        }
+
+        if (position < 0)
+          return this;
+
+        if (position === 0)
+          list.shift();
+        else
+          spliceOne(list, position);
+
+        if (list.length === 1)
+          events[type] = list[0];
+
+        if (events.removeListener)
+          this.emit('removeListener', type, originalListener || listener);
+      }
+
+      return this;
+    };
+
+EventEmitter.prototype.removeAllListeners =
+    function removeAllListeners(type) {
+      var listeners, events, i;
+
+      events = this._events;
+      if (!events)
+        return this;
+
+      // not listening for removeListener, no need to emit
+      if (!events.removeListener) {
+        if (arguments.length === 0) {
+          this._events = objectCreate(null);
+          this._eventsCount = 0;
+        } else if (events[type]) {
+          if (--this._eventsCount === 0)
+            this._events = objectCreate(null);
+          else
+            delete events[type];
+        }
+        return this;
+      }
+
+      // emit removeListener for all listeners on all events
+      if (arguments.length === 0) {
+        var keys = objectKeys(events);
+        var key;
+        for (i = 0; i < keys.length; ++i) {
+          key = keys[i];
+          if (key === 'removeListener') continue;
+          this.removeAllListeners(key);
+        }
+        this.removeAllListeners('removeListener');
+        this._events = objectCreate(null);
+        this._eventsCount = 0;
+        return this;
+      }
+
+      listeners = events[type];
+
+      if (typeof listeners === 'function') {
+        this.removeListener(type, listeners);
+      } else if (listeners) {
+        // LIFO order
+        for (i = listeners.length - 1; i >= 0; i--) {
+          this.removeListener(type, listeners[i]);
+        }
+      }
+
+      return this;
+    };
+
+function _listeners(target, type, unwrap) {
+  var events = target._events;
+
+  if (!events)
+    return [];
+
+  var evlistener = events[type];
+  if (!evlistener)
+    return [];
+
+  if (typeof evlistener === 'function')
+    return unwrap ? [evlistener.listener || evlistener] : [evlistener];
+
+  return unwrap ? unwrapListeners(evlistener) : arrayClone(evlistener, evlistener.length);
+}
+
+EventEmitter.prototype.listeners = function listeners(type) {
+  return _listeners(this, type, true);
 };
 
-EventEmitter.prototype.removeAllListeners = function(type) {
-  var key, listeners;
-
-  if (!this._events)
-    return this;
-
-  // not listening for removeListener, no need to emit
-  if (!this._events.removeListener) {
-    if (arguments.length === 0)
-      this._events = {};
-    else if (this._events[type])
-      delete this._events[type];
-    return this;
-  }
-
-  // emit removeListener for all listeners on all events
-  if (arguments.length === 0) {
-    for (key in this._events) {
-      if (key === 'removeListener') continue;
-      this.removeAllListeners(key);
-    }
-    this.removeAllListeners('removeListener');
-    this._events = {};
-    return this;
-  }
-
-  listeners = this._events[type];
-
-  if (isFunction(listeners)) {
-    this.removeListener(type, listeners);
-  } else if (listeners) {
-    // LIFO order
-    while (listeners.length)
-      this.removeListener(type, listeners[listeners.length - 1]);
-  }
-  delete this._events[type];
-
-  return this;
-};
-
-EventEmitter.prototype.listeners = function(type) {
-  var ret;
-  if (!this._events || !this._events[type])
-    ret = [];
-  else if (isFunction(this._events[type]))
-    ret = [this._events[type]];
-  else
-    ret = this._events[type].slice();
-  return ret;
-};
-
-EventEmitter.prototype.listenerCount = function(type) {
-  if (this._events) {
-    var evlistener = this._events[type];
-
-    if (isFunction(evlistener))
-      return 1;
-    else if (evlistener)
-      return evlistener.length;
-  }
-  return 0;
+EventEmitter.prototype.rawListeners = function rawListeners(type) {
+  return _listeners(this, type, false);
 };
 
 EventEmitter.listenerCount = function(emitter, type) {
-  return emitter.listenerCount(type);
+  if (typeof emitter.listenerCount === 'function') {
+    return emitter.listenerCount(type);
+  } else {
+    return listenerCount.call(emitter, type);
+  }
 };
 
-function isFunction(arg) {
-  return typeof arg === 'function';
+EventEmitter.prototype.listenerCount = listenerCount;
+function listenerCount(type) {
+  var events = this._events;
+
+  if (events) {
+    var evlistener = events[type];
+
+    if (typeof evlistener === 'function') {
+      return 1;
+    } else if (evlistener) {
+      return evlistener.length;
+    }
+  }
+
+  return 0;
 }
 
-function isNumber(arg) {
-  return typeof arg === 'number';
+EventEmitter.prototype.eventNames = function eventNames() {
+  return this._eventsCount > 0 ? Reflect.ownKeys(this._events) : [];
+};
+
+// About 1.5x faster than the two-arg version of Array#splice().
+function spliceOne(list, index) {
+  for (var i = index, k = i + 1, n = list.length; k < n; i += 1, k += 1)
+    list[i] = list[k];
+  list.pop();
 }
 
-function isObject(arg) {
-  return typeof arg === 'object' && arg !== null;
+function arrayClone(arr, n) {
+  var copy = new Array(n);
+  for (var i = 0; i < n; ++i)
+    copy[i] = arr[i];
+  return copy;
 }
 
-function isUndefined(arg) {
-  return arg === void 0;
+function unwrapListeners(arr) {
+  var ret = new Array(arr.length);
+  for (var i = 0; i < ret.length; ++i) {
+    ret[i] = arr[i].listener || arr[i];
+  }
+  return ret;
 }
 
-},{}],16:[function(require,module,exports){
+function objectCreatePolyfill(proto) {
+  var F = function() {};
+  F.prototype = proto;
+  return new F;
+}
+function objectKeysPolyfill(obj) {
+  var keys = [];
+  for (var k in obj) if (Object.prototype.hasOwnProperty.call(obj, k)) {
+    keys.push(k);
+  }
+  return k;
+}
+function functionBindPolyfill(context) {
+  var fn = this;
+  return function () {
+    return fn.apply(context, arguments);
+  };
+}
+
+},{}],17:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
-  var eLen = nBytes * 8 - mLen - 1
+  var eLen = (nBytes * 8) - mLen - 1
   var eMax = (1 << eLen) - 1
   var eBias = eMax >> 1
   var nBits = -7
@@ -5123,12 +5582,12 @@ exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   e = s & ((1 << (-nBits)) - 1)
   s >>= (-nBits)
   nBits += eLen
-  for (; nBits > 0; e = e * 256 + buffer[offset + i], i += d, nBits -= 8) {}
+  for (; nBits > 0; e = (e * 256) + buffer[offset + i], i += d, nBits -= 8) {}
 
   m = e & ((1 << (-nBits)) - 1)
   e >>= (-nBits)
   nBits += mLen
-  for (; nBits > 0; m = m * 256 + buffer[offset + i], i += d, nBits -= 8) {}
+  for (; nBits > 0; m = (m * 256) + buffer[offset + i], i += d, nBits -= 8) {}
 
   if (e === 0) {
     e = 1 - eBias
@@ -5143,7 +5602,7 @@ exports.read = function (buffer, offset, isLE, mLen, nBytes) {
 
 exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   var e, m, c
-  var eLen = nBytes * 8 - mLen - 1
+  var eLen = (nBytes * 8) - mLen - 1
   var eMax = (1 << eLen) - 1
   var eBias = eMax >> 1
   var rt = (mLen === 23 ? Math.pow(2, -24) - Math.pow(2, -77) : 0)
@@ -5176,7 +5635,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       m = 0
       e = eMax
     } else if (e + eBias >= 1) {
-      m = (value * c - 1) * Math.pow(2, mLen)
+      m = ((value * c) - 1) * Math.pow(2, mLen)
       e = e + eBias
     } else {
       m = value * Math.pow(2, eBias - 1) * Math.pow(2, mLen)
@@ -5193,7 +5652,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],17:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -5218,11 +5677,11 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],18:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 /*!
  * Determine if an object is a Buffer
  *
- * @author   Feross Aboukhadijeh <feross@feross.org> <http://feross.org>
+ * @author   Feross Aboukhadijeh <https://feross.org>
  * @license  MIT
  */
 
@@ -5241,23 +5700,23 @@ function isSlowBuffer (obj) {
   return typeof obj.readFloatLE === 'function' && typeof obj.slice === 'function' && isBuffer(obj.slice(0, 0))
 }
 
-},{}],19:[function(require,module,exports){
+},{}],20:[function(require,module,exports){
 var toString = {}.toString;
 
 module.exports = Array.isArray || function (arr) {
   return toString.call(arr) == '[object Array]';
 };
 
-},{}],20:[function(require,module,exports){
+},{}],21:[function(require,module,exports){
 (function (process){
 'use strict';
 
 if (!process.version ||
     process.version.indexOf('v0.') === 0 ||
     process.version.indexOf('v1.') === 0 && process.version.indexOf('v1.8.') !== 0) {
-  module.exports = nextTick;
+  module.exports = { nextTick: nextTick };
 } else {
-  module.exports = process.nextTick;
+  module.exports = process
 }
 
 function nextTick(fn, arg1, arg2, arg3) {
@@ -5294,8 +5753,9 @@ function nextTick(fn, arg1, arg2, arg3) {
   }
 }
 
+
 }).call(this,require('_process'))
-},{"_process":21}],21:[function(require,module,exports){
+},{"_process":22}],22:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -5466,6 +5926,10 @@ process.off = noop;
 process.removeListener = noop;
 process.removeAllListeners = noop;
 process.emit = noop;
+process.prependListener = noop;
+process.prependOnceListener = noop;
+
+process.listeners = function (name) { return [] }
 
 process.binding = function (name) {
     throw new Error('process.binding is not supported');
@@ -5477,10 +5941,31 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],22:[function(require,module,exports){
-module.exports = require("./lib/_stream_duplex.js")
+},{}],23:[function(require,module,exports){
+module.exports = require('./lib/_stream_duplex.js');
 
-},{"./lib/_stream_duplex.js":23}],23:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":24}],24:[function(require,module,exports){
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 // a duplex stream is just a stream that is both readable and writable.
 // Since JS doesn't have multiple prototypal inheritance, this class
 // prototypally inherits from Readable, and then parasitically from
@@ -5490,6 +5975,10 @@ module.exports = require("./lib/_stream_duplex.js")
 
 /*<replacement>*/
 
+var pna = require('process-nextick-args');
+/*</replacement>*/
+
+/*<replacement>*/
 var objectKeys = Object.keys || function (obj) {
   var keys = [];
   for (var key in obj) {
@@ -5501,10 +5990,6 @@ var objectKeys = Object.keys || function (obj) {
 module.exports = Duplex;
 
 /*<replacement>*/
-var processNextTick = require('process-nextick-args');
-/*</replacement>*/
-
-/*<replacement>*/
 var util = require('core-util-is');
 util.inherits = require('inherits');
 /*</replacement>*/
@@ -5514,10 +5999,13 @@ var Writable = require('./_stream_writable');
 
 util.inherits(Duplex, Readable);
 
-var keys = objectKeys(Writable.prototype);
-for (var v = 0; v < keys.length; v++) {
-  var method = keys[v];
-  if (!Duplex.prototype[method]) Duplex.prototype[method] = Writable.prototype[method];
+{
+  // avoid scope creep, the keys array can then be collected
+  var keys = objectKeys(Writable.prototype);
+  for (var v = 0; v < keys.length; v++) {
+    var method = keys[v];
+    if (!Duplex.prototype[method]) Duplex.prototype[method] = Writable.prototype[method];
+  }
 }
 
 function Duplex(options) {
@@ -5536,6 +6024,16 @@ function Duplex(options) {
   this.once('end', onend);
 }
 
+Object.defineProperty(Duplex.prototype, 'writableHighWaterMark', {
+  // making it explicit this property is not enumerable
+  // because otherwise some prototype manipulation in
+  // userland will fail
+  enumerable: false,
+  get: function () {
+    return this._writableState.highWaterMark;
+  }
+});
+
 // the no-half-open enforcer
 function onend() {
   // if we allow half-open state, or if the writable side ended,
@@ -5544,19 +6042,62 @@ function onend() {
 
   // no more data can be written.
   // But allow more writes to happen in this tick.
-  processNextTick(onEndNT, this);
+  pna.nextTick(onEndNT, this);
 }
 
 function onEndNT(self) {
   self.end();
 }
 
-function forEach(xs, f) {
-  for (var i = 0, l = xs.length; i < l; i++) {
-    f(xs[i], i);
+Object.defineProperty(Duplex.prototype, 'destroyed', {
+  get: function () {
+    if (this._readableState === undefined || this._writableState === undefined) {
+      return false;
+    }
+    return this._readableState.destroyed && this._writableState.destroyed;
+  },
+  set: function (value) {
+    // we ignore the value if the stream
+    // has not been initialized yet
+    if (this._readableState === undefined || this._writableState === undefined) {
+      return;
+    }
+
+    // backward compatibility, the user is explicitly
+    // managing destroyed
+    this._readableState.destroyed = value;
+    this._writableState.destroyed = value;
   }
-}
-},{"./_stream_readable":25,"./_stream_writable":27,"core-util-is":14,"inherits":17,"process-nextick-args":20}],24:[function(require,module,exports){
+});
+
+Duplex.prototype._destroy = function (err, cb) {
+  this.push(null);
+  this.end();
+
+  pna.nextTick(cb, err);
+};
+},{"./_stream_readable":26,"./_stream_writable":28,"core-util-is":15,"inherits":18,"process-nextick-args":21}],25:[function(require,module,exports){
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 // a passthrough stream.
 // basically just the most minimal sort of Transform stream.
 // Every written chunk gets output as-is.
@@ -5583,15 +6124,37 @@ function PassThrough(options) {
 PassThrough.prototype._transform = function (chunk, encoding, cb) {
   cb(null, chunk);
 };
-},{"./_stream_transform":26,"core-util-is":14,"inherits":17}],25:[function(require,module,exports){
-(function (process){
+},{"./_stream_transform":27,"core-util-is":15,"inherits":18}],26:[function(require,module,exports){
+(function (process,global){
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 'use strict';
 
-module.exports = Readable;
-
 /*<replacement>*/
-var processNextTick = require('process-nextick-args');
+
+var pna = require('process-nextick-args');
 /*</replacement>*/
+
+module.exports = Readable;
 
 /*<replacement>*/
 var isArray = require('isarray');
@@ -5612,19 +6175,20 @@ var EElistenerCount = function (emitter, type) {
 /*</replacement>*/
 
 /*<replacement>*/
-var Stream;
-(function () {
-  try {
-    Stream = require('st' + 'ream');
-  } catch (_) {} finally {
-    if (!Stream) Stream = require('events').EventEmitter;
-  }
-})();
+var Stream = require('./internal/streams/stream');
 /*</replacement>*/
 
-var Buffer = require('buffer').Buffer;
 /*<replacement>*/
-var bufferShim = require('buffer-shims');
+
+var Buffer = require('safe-buffer').Buffer;
+var OurUint8Array = global.Uint8Array || function () {};
+function _uint8ArrayToBuffer(chunk) {
+  return Buffer.from(chunk);
+}
+function _isUint8Array(obj) {
+  return Buffer.isBuffer(obj) || obj instanceof OurUint8Array;
+}
+
 /*</replacement>*/
 
 /*<replacement>*/
@@ -5643,22 +6207,23 @@ if (debugUtil && debugUtil.debuglog) {
 /*</replacement>*/
 
 var BufferList = require('./internal/streams/BufferList');
+var destroyImpl = require('./internal/streams/destroy');
 var StringDecoder;
 
 util.inherits(Readable, Stream);
 
+var kProxyEvents = ['error', 'close', 'destroy', 'pause', 'resume'];
+
 function prependListener(emitter, event, fn) {
   // Sadly this is not cacheable as some libraries bundle their own
   // event emitter implementation with them.
-  if (typeof emitter.prependListener === 'function') {
-    return emitter.prependListener(event, fn);
-  } else {
-    // This is a hack to make sure that our error handler is attached before any
-    // userland ones.  NEVER DO THIS. This is here only because this code needs
-    // to continue to work with older versions of Node.js that do not include
-    // the prependListener() method. The goal is to eventually remove this hack.
-    if (!emitter._events || !emitter._events[event]) emitter.on(event, fn);else if (isArray(emitter._events[event])) emitter._events[event].unshift(fn);else emitter._events[event] = [fn, emitter._events[event]];
-  }
+  if (typeof emitter.prependListener === 'function') return emitter.prependListener(event, fn);
+
+  // This is a hack to make sure that our error handler is attached before any
+  // userland ones.  NEVER DO THIS. This is here only because this code needs
+  // to continue to work with older versions of Node.js that do not include
+  // the prependListener() method. The goal is to eventually remove this hack.
+  if (!emitter._events || !emitter._events[event]) emitter.on(event, fn);else if (isArray(emitter._events[event])) emitter._events[event].unshift(fn);else emitter._events[event] = [fn, emitter._events[event]];
 }
 
 function ReadableState(options, stream) {
@@ -5666,20 +6231,29 @@ function ReadableState(options, stream) {
 
   options = options || {};
 
+  // Duplex streams are both readable and writable, but share
+  // the same options object.
+  // However, some cases require setting options to different
+  // values for the readable and the writable sides of the duplex stream.
+  // These options can be provided separately as readableXXX and writableXXX.
+  var isDuplex = stream instanceof Duplex;
+
   // object stream flag. Used to make read(n) ignore n and to
   // make all the buffer merging and length checks go away
   this.objectMode = !!options.objectMode;
 
-  if (stream instanceof Duplex) this.objectMode = this.objectMode || !!options.readableObjectMode;
+  if (isDuplex) this.objectMode = this.objectMode || !!options.readableObjectMode;
 
   // the point at which it stops calling _read() to fill the buffer
   // Note: 0 is a valid value, means "don't call _read preemptively ever"
   var hwm = options.highWaterMark;
+  var readableHwm = options.readableHighWaterMark;
   var defaultHwm = this.objectMode ? 16 : 16 * 1024;
-  this.highWaterMark = hwm || hwm === 0 ? hwm : defaultHwm;
+
+  if (hwm || hwm === 0) this.highWaterMark = hwm;else if (isDuplex && (readableHwm || readableHwm === 0)) this.highWaterMark = readableHwm;else this.highWaterMark = defaultHwm;
 
   // cast to ints.
-  this.highWaterMark = ~ ~this.highWaterMark;
+  this.highWaterMark = Math.floor(this.highWaterMark);
 
   // A linked list is used to store data chunks instead of an array because the
   // linked list can remove elements from the beginning faster than
@@ -5693,10 +6267,10 @@ function ReadableState(options, stream) {
   this.endEmitted = false;
   this.reading = false;
 
-  // a flag to be able to tell if the onwrite cb is called immediately,
-  // or on a later tick.  We set this to true at first, because any
-  // actions that shouldn't happen until "later" should generally also
-  // not happen before the first write call.
+  // a flag to be able to tell if the event 'readable'/'data' is emitted
+  // immediately, or on a later tick.  We set this to true at first, because
+  // any actions that shouldn't happen until "later" should generally also
+  // not happen before the first read call.
   this.sync = true;
 
   // whenever we return null, then we set a flag to say
@@ -5706,14 +6280,13 @@ function ReadableState(options, stream) {
   this.readableListening = false;
   this.resumeScheduled = false;
 
+  // has it been destroyed
+  this.destroyed = false;
+
   // Crypto is kind of old and crusty.  Historically, its default string
   // encoding is 'binary' so we have to make this configurable.
   // Everything else in the universe uses 'utf8', though.
   this.defaultEncoding = options.defaultEncoding || 'utf8';
-
-  // when piping, we only care about 'readable' events that happen
-  // after read()ing all the bytes and not getting any pushback.
-  this.ranOut = false;
 
   // the number of writers that are awaiting a drain event in .pipe()s
   this.awaitDrain = 0;
@@ -5740,10 +6313,41 @@ function Readable(options) {
   // legacy
   this.readable = true;
 
-  if (options && typeof options.read === 'function') this._read = options.read;
+  if (options) {
+    if (typeof options.read === 'function') this._read = options.read;
+
+    if (typeof options.destroy === 'function') this._destroy = options.destroy;
+  }
 
   Stream.call(this);
 }
+
+Object.defineProperty(Readable.prototype, 'destroyed', {
+  get: function () {
+    if (this._readableState === undefined) {
+      return false;
+    }
+    return this._readableState.destroyed;
+  },
+  set: function (value) {
+    // we ignore the value if the stream
+    // has not been initialized yet
+    if (!this._readableState) {
+      return;
+    }
+
+    // backward compatibility, the user is explicitly
+    // managing destroyed
+    this._readableState.destroyed = value;
+  }
+});
+
+Readable.prototype.destroy = destroyImpl.destroy;
+Readable.prototype._undestroy = destroyImpl.undestroy;
+Readable.prototype._destroy = function (err, cb) {
+  this.push(null);
+  cb(err);
+};
 
 // Manually shove something into the read() buffer.
 // This returns true if the highWaterMark has not been hit yet,
@@ -5751,74 +6355,85 @@ function Readable(options) {
 // write() some more.
 Readable.prototype.push = function (chunk, encoding) {
   var state = this._readableState;
+  var skipChunkCheck;
 
-  if (!state.objectMode && typeof chunk === 'string') {
-    encoding = encoding || state.defaultEncoding;
-    if (encoding !== state.encoding) {
-      chunk = bufferShim.from(chunk, encoding);
-      encoding = '';
+  if (!state.objectMode) {
+    if (typeof chunk === 'string') {
+      encoding = encoding || state.defaultEncoding;
+      if (encoding !== state.encoding) {
+        chunk = Buffer.from(chunk, encoding);
+        encoding = '';
+      }
+      skipChunkCheck = true;
     }
+  } else {
+    skipChunkCheck = true;
   }
 
-  return readableAddChunk(this, state, chunk, encoding, false);
+  return readableAddChunk(this, chunk, encoding, false, skipChunkCheck);
 };
 
 // Unshift should *always* be something directly out of read()
 Readable.prototype.unshift = function (chunk) {
-  var state = this._readableState;
-  return readableAddChunk(this, state, chunk, '', true);
+  return readableAddChunk(this, chunk, null, true, false);
 };
 
-Readable.prototype.isPaused = function () {
-  return this._readableState.flowing === false;
-};
-
-function readableAddChunk(stream, state, chunk, encoding, addToFront) {
-  var er = chunkInvalid(state, chunk);
-  if (er) {
-    stream.emit('error', er);
-  } else if (chunk === null) {
+function readableAddChunk(stream, chunk, encoding, addToFront, skipChunkCheck) {
+  var state = stream._readableState;
+  if (chunk === null) {
     state.reading = false;
     onEofChunk(stream, state);
-  } else if (state.objectMode || chunk && chunk.length > 0) {
-    if (state.ended && !addToFront) {
-      var e = new Error('stream.push() after EOF');
-      stream.emit('error', e);
-    } else if (state.endEmitted && addToFront) {
-      var _e = new Error('stream.unshift() after end event');
-      stream.emit('error', _e);
-    } else {
-      var skipAdd;
-      if (state.decoder && !addToFront && !encoding) {
-        chunk = state.decoder.write(chunk);
-        skipAdd = !state.objectMode && chunk.length === 0;
+  } else {
+    var er;
+    if (!skipChunkCheck) er = chunkInvalid(state, chunk);
+    if (er) {
+      stream.emit('error', er);
+    } else if (state.objectMode || chunk && chunk.length > 0) {
+      if (typeof chunk !== 'string' && !state.objectMode && Object.getPrototypeOf(chunk) !== Buffer.prototype) {
+        chunk = _uint8ArrayToBuffer(chunk);
       }
 
-      if (!addToFront) state.reading = false;
-
-      // Don't add to the buffer if we've decoded to an empty string chunk and
-      // we're not in object mode
-      if (!skipAdd) {
-        // if we want the data now, just emit it.
-        if (state.flowing && state.length === 0 && !state.sync) {
-          stream.emit('data', chunk);
-          stream.read(0);
+      if (addToFront) {
+        if (state.endEmitted) stream.emit('error', new Error('stream.unshift() after end event'));else addChunk(stream, state, chunk, true);
+      } else if (state.ended) {
+        stream.emit('error', new Error('stream.push() after EOF'));
+      } else {
+        state.reading = false;
+        if (state.decoder && !encoding) {
+          chunk = state.decoder.write(chunk);
+          if (state.objectMode || chunk.length !== 0) addChunk(stream, state, chunk, false);else maybeReadMore(stream, state);
         } else {
-          // update the buffer info.
-          state.length += state.objectMode ? 1 : chunk.length;
-          if (addToFront) state.buffer.unshift(chunk);else state.buffer.push(chunk);
-
-          if (state.needReadable) emitReadable(stream);
+          addChunk(stream, state, chunk, false);
         }
       }
-
-      maybeReadMore(stream, state);
+    } else if (!addToFront) {
+      state.reading = false;
     }
-  } else if (!addToFront) {
-    state.reading = false;
   }
 
   return needMoreData(state);
+}
+
+function addChunk(stream, state, chunk, addToFront) {
+  if (state.flowing && state.length === 0 && !state.sync) {
+    stream.emit('data', chunk);
+    stream.read(0);
+  } else {
+    // update the buffer info.
+    state.length += state.objectMode ? 1 : chunk.length;
+    if (addToFront) state.buffer.unshift(chunk);else state.buffer.push(chunk);
+
+    if (state.needReadable) emitReadable(stream);
+  }
+  maybeReadMore(stream, state);
+}
+
+function chunkInvalid(state, chunk) {
+  var er;
+  if (!_isUint8Array(chunk) && typeof chunk !== 'string' && chunk !== undefined && !state.objectMode) {
+    er = new TypeError('Invalid non-string/buffer chunk');
+  }
+  return er;
 }
 
 // if it's past the high water mark, we can push in some more.
@@ -5831,6 +6446,10 @@ function readableAddChunk(stream, state, chunk, encoding, addToFront) {
 function needMoreData(state) {
   return !state.ended && (state.needReadable || state.length < state.highWaterMark || state.length === 0);
 }
+
+Readable.prototype.isPaused = function () {
+  return this._readableState.flowing === false;
+};
 
 // backwards compatibility.
 Readable.prototype.setEncoding = function (enc) {
@@ -5980,14 +6599,6 @@ Readable.prototype.read = function (n) {
   return ret;
 };
 
-function chunkInvalid(state, chunk) {
-  var er = null;
-  if (!Buffer.isBuffer(chunk) && typeof chunk !== 'string' && chunk !== null && chunk !== undefined && !state.objectMode) {
-    er = new TypeError('Invalid non-string/buffer chunk');
-  }
-  return er;
-}
-
 function onEofChunk(stream, state) {
   if (state.ended) return;
   if (state.decoder) {
@@ -6012,7 +6623,7 @@ function emitReadable(stream) {
   if (!state.emittedReadable) {
     debug('emitReadable', state.flowing);
     state.emittedReadable = true;
-    if (state.sync) processNextTick(emitReadable_, stream);else emitReadable_(stream);
+    if (state.sync) pna.nextTick(emitReadable_, stream);else emitReadable_(stream);
   }
 }
 
@@ -6031,7 +6642,7 @@ function emitReadable_(stream) {
 function maybeReadMore(stream, state) {
   if (!state.readingMore) {
     state.readingMore = true;
-    processNextTick(maybeReadMore_, stream, state);
+    pna.nextTick(maybeReadMore_, stream, state);
   }
 }
 
@@ -6075,14 +6686,17 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
 
   var doEnd = (!pipeOpts || pipeOpts.end !== false) && dest !== process.stdout && dest !== process.stderr;
 
-  var endFn = doEnd ? onend : cleanup;
-  if (state.endEmitted) processNextTick(endFn);else src.once('end', endFn);
+  var endFn = doEnd ? onend : unpipe;
+  if (state.endEmitted) pna.nextTick(endFn);else src.once('end', endFn);
 
   dest.on('unpipe', onunpipe);
-  function onunpipe(readable) {
+  function onunpipe(readable, unpipeInfo) {
     debug('onunpipe');
     if (readable === src) {
-      cleanup();
+      if (unpipeInfo && unpipeInfo.hasUnpiped === false) {
+        unpipeInfo.hasUnpiped = true;
+        cleanup();
+      }
     }
   }
 
@@ -6108,7 +6722,7 @@ Readable.prototype.pipe = function (dest, pipeOpts) {
     dest.removeListener('error', onerror);
     dest.removeListener('unpipe', onunpipe);
     src.removeListener('end', onend);
-    src.removeListener('end', cleanup);
+    src.removeListener('end', unpipe);
     src.removeListener('data', ondata);
 
     cleanedUp = true;
@@ -6201,6 +6815,7 @@ function pipeOnDrain(src) {
 
 Readable.prototype.unpipe = function (dest) {
   var state = this._readableState;
+  var unpipeInfo = { hasUnpiped: false };
 
   // if we're not piping anywhere, then do nothing.
   if (state.pipesCount === 0) return this;
@@ -6216,7 +6831,7 @@ Readable.prototype.unpipe = function (dest) {
     state.pipes = null;
     state.pipesCount = 0;
     state.flowing = false;
-    if (dest) dest.emit('unpipe', this);
+    if (dest) dest.emit('unpipe', this, unpipeInfo);
     return this;
   }
 
@@ -6231,7 +6846,7 @@ Readable.prototype.unpipe = function (dest) {
     state.flowing = false;
 
     for (var i = 0; i < len; i++) {
-      dests[i].emit('unpipe', this);
+      dests[i].emit('unpipe', this, unpipeInfo);
     }return this;
   }
 
@@ -6243,7 +6858,7 @@ Readable.prototype.unpipe = function (dest) {
   state.pipesCount -= 1;
   if (state.pipesCount === 1) state.pipes = state.pipes[0];
 
-  dest.emit('unpipe', this);
+  dest.emit('unpipe', this, unpipeInfo);
 
   return this;
 };
@@ -6262,9 +6877,9 @@ Readable.prototype.on = function (ev, fn) {
       state.readableListening = state.needReadable = true;
       state.emittedReadable = false;
       if (!state.reading) {
-        processNextTick(nReadingNextTick, this);
+        pna.nextTick(nReadingNextTick, this);
       } else if (state.length) {
-        emitReadable(this, state);
+        emitReadable(this);
       }
     }
   }
@@ -6293,7 +6908,7 @@ Readable.prototype.resume = function () {
 function resume(stream, state) {
   if (!state.resumeScheduled) {
     state.resumeScheduled = true;
-    processNextTick(resume_, stream, state);
+    pna.nextTick(resume_, stream, state);
   }
 }
 
@@ -6330,18 +6945,19 @@ function flow(stream) {
 // This is *not* part of the readable stream interface.
 // It is an ugly unfortunate mess of history.
 Readable.prototype.wrap = function (stream) {
+  var _this = this;
+
   var state = this._readableState;
   var paused = false;
 
-  var self = this;
   stream.on('end', function () {
     debug('wrapped end');
     if (state.decoder && !state.ended) {
       var chunk = state.decoder.end();
-      if (chunk && chunk.length) self.push(chunk);
+      if (chunk && chunk.length) _this.push(chunk);
     }
 
-    self.push(null);
+    _this.push(null);
   });
 
   stream.on('data', function (chunk) {
@@ -6351,7 +6967,7 @@ Readable.prototype.wrap = function (stream) {
     // don't skip over falsy values in objectMode
     if (state.objectMode && (chunk === null || chunk === undefined)) return;else if (!state.objectMode && (!chunk || !chunk.length)) return;
 
-    var ret = self.push(chunk);
+    var ret = _this.push(chunk);
     if (!ret) {
       paused = true;
       stream.pause();
@@ -6371,14 +6987,13 @@ Readable.prototype.wrap = function (stream) {
   }
 
   // proxy certain important events.
-  var events = ['error', 'close', 'destroy', 'pause', 'resume'];
-  forEach(events, function (ev) {
-    stream.on(ev, self.emit.bind(self, ev));
-  });
+  for (var n = 0; n < kProxyEvents.length; n++) {
+    stream.on(kProxyEvents[n], this.emit.bind(this, kProxyEvents[n]));
+  }
 
   // when we try to consume some more bytes, simply unpause the
   // underlying stream.
-  self._read = function (n) {
+  this._read = function (n) {
     debug('wrapped _read', n);
     if (paused) {
       paused = false;
@@ -6386,8 +7001,18 @@ Readable.prototype.wrap = function (stream) {
     }
   };
 
-  return self;
+  return this;
 };
+
+Object.defineProperty(Readable.prototype, 'readableHighWaterMark', {
+  // making it explicit this property is not enumerable
+  // because otherwise some prototype manipulation in
+  // userland will fail
+  enumerable: false,
+  get: function () {
+    return this._readableState.highWaterMark;
+  }
+});
 
 // exposed for testing purposes only.
 Readable._fromList = fromList;
@@ -6466,7 +7091,7 @@ function copyFromBufferString(n, list) {
 // This function is designed to be inlinable, so please take care when making
 // changes to the function body.
 function copyFromBuffer(n, list) {
-  var ret = bufferShim.allocUnsafe(n);
+  var ret = Buffer.allocUnsafe(n);
   var p = list.head;
   var c = 1;
   p.data.copy(ret);
@@ -6501,7 +7126,7 @@ function endReadable(stream) {
 
   if (!state.endEmitted) {
     state.ended = true;
-    processNextTick(endReadableNT, state, stream);
+    pna.nextTick(endReadableNT, state, stream);
   }
 }
 
@@ -6514,20 +7139,35 @@ function endReadableNT(state, stream) {
   }
 }
 
-function forEach(xs, f) {
-  for (var i = 0, l = xs.length; i < l; i++) {
-    f(xs[i], i);
-  }
-}
-
 function indexOf(xs, x) {
   for (var i = 0, l = xs.length; i < l; i++) {
     if (xs[i] === x) return i;
   }
   return -1;
 }
-}).call(this,require('_process'))
-},{"./_stream_duplex":23,"./internal/streams/BufferList":28,"_process":21,"buffer":13,"buffer-shims":12,"core-util-is":14,"events":15,"inherits":17,"isarray":19,"process-nextick-args":20,"string_decoder/":34,"util":11}],26:[function(require,module,exports){
+}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{"./_stream_duplex":24,"./internal/streams/BufferList":29,"./internal/streams/destroy":30,"./internal/streams/stream":31,"_process":22,"core-util-is":15,"events":16,"inherits":18,"isarray":20,"process-nextick-args":21,"safe-buffer":37,"string_decoder/":32,"util":13}],27:[function(require,module,exports){
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 // a transform stream is a readable/writable stream where you do
 // something with the data.  Sometimes it's called a "filter",
 // but that's not a great name for it, since that implies a thing where
@@ -6583,37 +7223,28 @@ util.inherits = require('inherits');
 
 util.inherits(Transform, Duplex);
 
-function TransformState(stream) {
-  this.afterTransform = function (er, data) {
-    return afterTransform(stream, er, data);
-  };
-
-  this.needTransform = false;
-  this.transforming = false;
-  this.writecb = null;
-  this.writechunk = null;
-  this.writeencoding = null;
-}
-
-function afterTransform(stream, er, data) {
-  var ts = stream._transformState;
+function afterTransform(er, data) {
+  var ts = this._transformState;
   ts.transforming = false;
 
   var cb = ts.writecb;
 
-  if (!cb) return stream.emit('error', new Error('no writecb in Transform class'));
+  if (!cb) {
+    return this.emit('error', new Error('write callback called multiple times'));
+  }
 
   ts.writechunk = null;
   ts.writecb = null;
 
-  if (data !== null && data !== undefined) stream.push(data);
+  if (data != null) // single equals check for both `null` and `undefined`
+    this.push(data);
 
   cb(er);
 
-  var rs = stream._readableState;
+  var rs = this._readableState;
   rs.reading = false;
   if (rs.needReadable || rs.length < rs.highWaterMark) {
-    stream._read(rs.highWaterMark);
+    this._read(rs.highWaterMark);
   }
 }
 
@@ -6622,9 +7253,14 @@ function Transform(options) {
 
   Duplex.call(this, options);
 
-  this._transformState = new TransformState(this);
-
-  var stream = this;
+  this._transformState = {
+    afterTransform: afterTransform.bind(this),
+    needTransform: false,
+    transforming: false,
+    writecb: null,
+    writechunk: null,
+    writeencoding: null
+  };
 
   // start out asking for a readable event once data is transformed.
   this._readableState.needReadable = true;
@@ -6641,11 +7277,19 @@ function Transform(options) {
   }
 
   // When the writable side finishes, then flush out anything remaining.
-  this.once('prefinish', function () {
-    if (typeof this._flush === 'function') this._flush(function (er, data) {
-      done(stream, er, data);
-    });else done(stream);
-  });
+  this.on('prefinish', prefinish);
+}
+
+function prefinish() {
+  var _this = this;
+
+  if (typeof this._flush === 'function') {
+    this._flush(function (er, data) {
+      done(_this, er, data);
+    });
+  } else {
+    done(this, null, null);
+  }
 }
 
 Transform.prototype.push = function (chunk, encoding) {
@@ -6694,38 +7338,88 @@ Transform.prototype._read = function (n) {
   }
 };
 
+Transform.prototype._destroy = function (err, cb) {
+  var _this2 = this;
+
+  Duplex.prototype._destroy.call(this, err, function (err2) {
+    cb(err2);
+    _this2.emit('close');
+  });
+};
+
 function done(stream, er, data) {
   if (er) return stream.emit('error', er);
 
-  if (data !== null && data !== undefined) stream.push(data);
+  if (data != null) // single equals check for both `null` and `undefined`
+    stream.push(data);
 
   // if there's nothing in the write buffer, then that means
   // that nothing more will ever be provided
-  var ws = stream._writableState;
-  var ts = stream._transformState;
+  if (stream._writableState.length) throw new Error('Calling transform done when ws.length != 0');
 
-  if (ws.length) throw new Error('Calling transform done when ws.length != 0');
-
-  if (ts.transforming) throw new Error('Calling transform done when still transforming');
+  if (stream._transformState.transforming) throw new Error('Calling transform done when still transforming');
 
   return stream.push(null);
 }
-},{"./_stream_duplex":23,"core-util-is":14,"inherits":17}],27:[function(require,module,exports){
-(function (process){
+},{"./_stream_duplex":24,"core-util-is":15,"inherits":18}],28:[function(require,module,exports){
+(function (process,global,setImmediate){
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 // A bit simpler than readable streams.
 // Implement an async ._write(chunk, encoding, cb), and it'll handle all
 // the drain event emission and buffering.
 
 'use strict';
 
-module.exports = Writable;
-
 /*<replacement>*/
-var processNextTick = require('process-nextick-args');
+
+var pna = require('process-nextick-args');
 /*</replacement>*/
 
+module.exports = Writable;
+
+/* <replacement> */
+function WriteReq(chunk, encoding, cb) {
+  this.chunk = chunk;
+  this.encoding = encoding;
+  this.callback = cb;
+  this.next = null;
+}
+
+// It seems a linked list but it is not
+// there will be only 2 of these for each stream
+function CorkedRequest(state) {
+  var _this = this;
+
+  this.next = null;
+  this.entry = null;
+  this.finish = function () {
+    onCorkedFinish(_this, state);
+  };
+}
+/* </replacement> */
+
 /*<replacement>*/
-var asyncWrite = !process.browser && ['v0.10', 'v0.9.'].indexOf(process.version.slice(0, 5)) > -1 ? setImmediate : processNextTick;
+var asyncWrite = !process.browser && ['v0.10', 'v0.9.'].indexOf(process.version.slice(0, 5)) > -1 ? setImmediate : pna.nextTick;
 /*</replacement>*/
 
 /*<replacement>*/
@@ -6746,52 +7440,60 @@ var internalUtil = {
 /*</replacement>*/
 
 /*<replacement>*/
-var Stream;
-(function () {
-  try {
-    Stream = require('st' + 'ream');
-  } catch (_) {} finally {
-    if (!Stream) Stream = require('events').EventEmitter;
-  }
-})();
+var Stream = require('./internal/streams/stream');
 /*</replacement>*/
 
-var Buffer = require('buffer').Buffer;
 /*<replacement>*/
-var bufferShim = require('buffer-shims');
+
+var Buffer = require('safe-buffer').Buffer;
+var OurUint8Array = global.Uint8Array || function () {};
+function _uint8ArrayToBuffer(chunk) {
+  return Buffer.from(chunk);
+}
+function _isUint8Array(obj) {
+  return Buffer.isBuffer(obj) || obj instanceof OurUint8Array;
+}
+
 /*</replacement>*/
+
+var destroyImpl = require('./internal/streams/destroy');
 
 util.inherits(Writable, Stream);
 
 function nop() {}
-
-function WriteReq(chunk, encoding, cb) {
-  this.chunk = chunk;
-  this.encoding = encoding;
-  this.callback = cb;
-  this.next = null;
-}
 
 function WritableState(options, stream) {
   Duplex = Duplex || require('./_stream_duplex');
 
   options = options || {};
 
+  // Duplex streams are both readable and writable, but share
+  // the same options object.
+  // However, some cases require setting options to different
+  // values for the readable and the writable sides of the duplex stream.
+  // These options can be provided separately as readableXXX and writableXXX.
+  var isDuplex = stream instanceof Duplex;
+
   // object stream flag to indicate whether or not this stream
   // contains buffers or objects.
   this.objectMode = !!options.objectMode;
 
-  if (stream instanceof Duplex) this.objectMode = this.objectMode || !!options.writableObjectMode;
+  if (isDuplex) this.objectMode = this.objectMode || !!options.writableObjectMode;
 
   // the point at which write() starts returning false
   // Note: 0 is a valid value, means that we always return false if
   // the entire buffer is not flushed immediately on write()
   var hwm = options.highWaterMark;
+  var writableHwm = options.writableHighWaterMark;
   var defaultHwm = this.objectMode ? 16 : 16 * 1024;
-  this.highWaterMark = hwm || hwm === 0 ? hwm : defaultHwm;
+
+  if (hwm || hwm === 0) this.highWaterMark = hwm;else if (isDuplex && (writableHwm || writableHwm === 0)) this.highWaterMark = writableHwm;else this.highWaterMark = defaultHwm;
 
   // cast to ints.
-  this.highWaterMark = ~ ~this.highWaterMark;
+  this.highWaterMark = Math.floor(this.highWaterMark);
+
+  // if _final has been called
+  this.finalCalled = false;
 
   // drain event flag.
   this.needDrain = false;
@@ -6801,6 +7503,9 @@ function WritableState(options, stream) {
   this.ended = false;
   // when 'finish' is emitted
   this.finished = false;
+
+  // has it been destroyed
+  this.destroyed = false;
 
   // should we decode strings into buffers before passing to _write?
   // this is here so that some node-core streams can optimize string
@@ -6883,7 +7588,7 @@ WritableState.prototype.getBuffer = function getBuffer() {
     Object.defineProperty(WritableState.prototype, 'buffer', {
       get: internalUtil.deprecate(function () {
         return this.getBuffer();
-      }, '_writableState.buffer is deprecated. Use _writableState.getBuffer ' + 'instead.')
+      }, '_writableState.buffer is deprecated. Use _writableState.getBuffer ' + 'instead.', 'DEP0003')
     });
   } catch (_) {}
 })();
@@ -6896,6 +7601,7 @@ if (typeof Symbol === 'function' && Symbol.hasInstance && typeof Function.protot
   Object.defineProperty(Writable, Symbol.hasInstance, {
     value: function (object) {
       if (realHasInstance.call(this, object)) return true;
+      if (this !== Writable) return false;
 
       return object && object._writableState instanceof WritableState;
     }
@@ -6929,6 +7635,10 @@ function Writable(options) {
     if (typeof options.write === 'function') this._write = options.write;
 
     if (typeof options.writev === 'function') this._writev = options.writev;
+
+    if (typeof options.destroy === 'function') this._destroy = options.destroy;
+
+    if (typeof options.final === 'function') this._final = options.final;
   }
 
   Stream.call(this);
@@ -6943,28 +7653,24 @@ function writeAfterEnd(stream, cb) {
   var er = new Error('write after end');
   // TODO: defer error events consistently everywhere, not just the cb
   stream.emit('error', er);
-  processNextTick(cb, er);
+  pna.nextTick(cb, er);
 }
 
-// If we get something that is not a buffer, string, null, or undefined,
-// and we're not in objectMode, then that's an error.
-// Otherwise stream chunks are all considered to be of length=1, and the
-// watermarks determine how many objects to keep in the buffer, rather than
-// how many bytes or characters.
+// Checks that a user-supplied chunk is valid, especially for the particular
+// mode the stream is in. Currently this means that `null` is never accepted
+// and undefined/non-string values are only allowed in object mode.
 function validChunk(stream, state, chunk, cb) {
   var valid = true;
   var er = false;
-  // Always throw error if a null is written
-  // if we are not in object mode then throw
-  // if it is not a buffer, string, or undefined.
+
   if (chunk === null) {
     er = new TypeError('May not write null values to stream');
-  } else if (!Buffer.isBuffer(chunk) && typeof chunk !== 'string' && chunk !== undefined && !state.objectMode) {
+  } else if (typeof chunk !== 'string' && chunk !== undefined && !state.objectMode) {
     er = new TypeError('Invalid non-string/buffer chunk');
   }
   if (er) {
     stream.emit('error', er);
-    processNextTick(cb, er);
+    pna.nextTick(cb, er);
     valid = false;
   }
   return valid;
@@ -6973,19 +7679,24 @@ function validChunk(stream, state, chunk, cb) {
 Writable.prototype.write = function (chunk, encoding, cb) {
   var state = this._writableState;
   var ret = false;
+  var isBuf = !state.objectMode && _isUint8Array(chunk);
+
+  if (isBuf && !Buffer.isBuffer(chunk)) {
+    chunk = _uint8ArrayToBuffer(chunk);
+  }
 
   if (typeof encoding === 'function') {
     cb = encoding;
     encoding = null;
   }
 
-  if (Buffer.isBuffer(chunk)) encoding = 'buffer';else if (!encoding) encoding = state.defaultEncoding;
+  if (isBuf) encoding = 'buffer';else if (!encoding) encoding = state.defaultEncoding;
 
   if (typeof cb !== 'function') cb = nop;
 
-  if (state.ended) writeAfterEnd(this, cb);else if (validChunk(this, state, chunk, cb)) {
+  if (state.ended) writeAfterEnd(this, cb);else if (isBuf || validChunk(this, state, chunk, cb)) {
     state.pendingcb++;
-    ret = writeOrBuffer(this, state, chunk, encoding, cb);
+    ret = writeOrBuffer(this, state, isBuf, chunk, encoding, cb);
   }
 
   return ret;
@@ -7017,18 +7728,33 @@ Writable.prototype.setDefaultEncoding = function setDefaultEncoding(encoding) {
 
 function decodeChunk(state, chunk, encoding) {
   if (!state.objectMode && state.decodeStrings !== false && typeof chunk === 'string') {
-    chunk = bufferShim.from(chunk, encoding);
+    chunk = Buffer.from(chunk, encoding);
   }
   return chunk;
 }
 
+Object.defineProperty(Writable.prototype, 'writableHighWaterMark', {
+  // making it explicit this property is not enumerable
+  // because otherwise some prototype manipulation in
+  // userland will fail
+  enumerable: false,
+  get: function () {
+    return this._writableState.highWaterMark;
+  }
+});
+
 // if we're already writing something, then just put this
 // in the queue, and wait our turn.  Otherwise, call _write
 // If we return false, then we need a drain event, so set that flag.
-function writeOrBuffer(stream, state, chunk, encoding, cb) {
-  chunk = decodeChunk(state, chunk, encoding);
-
-  if (Buffer.isBuffer(chunk)) encoding = 'buffer';
+function writeOrBuffer(stream, state, isBuf, chunk, encoding, cb) {
+  if (!isBuf) {
+    var newChunk = decodeChunk(state, chunk, encoding);
+    if (chunk !== newChunk) {
+      isBuf = true;
+      encoding = 'buffer';
+      chunk = newChunk;
+    }
+  }
   var len = state.objectMode ? 1 : chunk.length;
 
   state.length += len;
@@ -7039,7 +7765,13 @@ function writeOrBuffer(stream, state, chunk, encoding, cb) {
 
   if (state.writing || state.corked) {
     var last = state.lastBufferedRequest;
-    state.lastBufferedRequest = new WriteReq(chunk, encoding, cb);
+    state.lastBufferedRequest = {
+      chunk: chunk,
+      encoding: encoding,
+      isBuf: isBuf,
+      callback: cb,
+      next: null
+    };
     if (last) {
       last.next = state.lastBufferedRequest;
     } else {
@@ -7064,10 +7796,26 @@ function doWrite(stream, state, writev, len, chunk, encoding, cb) {
 
 function onwriteError(stream, state, sync, er, cb) {
   --state.pendingcb;
-  if (sync) processNextTick(cb, er);else cb(er);
 
-  stream._writableState.errorEmitted = true;
-  stream.emit('error', er);
+  if (sync) {
+    // defer the callback if we are being called synchronously
+    // to avoid piling up things on the stack
+    pna.nextTick(cb, er);
+    // this can emit finish, and it will always happen
+    // after error
+    pna.nextTick(finishMaybe, stream, state);
+    stream._writableState.errorEmitted = true;
+    stream.emit('error', er);
+  } else {
+    // the caller expect this to happen before if
+    // it is async
+    cb(er);
+    stream._writableState.errorEmitted = true;
+    stream.emit('error', er);
+    // this can emit finish, but finish must
+    // always follow error
+    finishMaybe(stream, state);
+  }
 }
 
 function onwriteStateUpdate(state) {
@@ -7097,8 +7845,8 @@ function onwrite(stream, er) {
       asyncWrite(afterWrite, stream, state, finished, cb);
       /*</replacement>*/
     } else {
-        afterWrite(stream, state, finished, cb);
-      }
+      afterWrite(stream, state, finished, cb);
+    }
   }
 }
 
@@ -7132,11 +7880,14 @@ function clearBuffer(stream, state) {
     holder.entry = entry;
 
     var count = 0;
+    var allBuffers = true;
     while (entry) {
       buffer[count] = entry;
+      if (!entry.isBuf) allBuffers = false;
       entry = entry.next;
       count += 1;
     }
+    buffer.allBuffers = allBuffers;
 
     doWrite(stream, state, true, state.length, buffer, '', holder.finish);
 
@@ -7150,6 +7901,7 @@ function clearBuffer(stream, state) {
     } else {
       state.corkedRequestsFree = new CorkedRequest(state);
     }
+    state.bufferedRequestCount = 0;
   } else {
     // Slow case, write chunks one-by-one
     while (entry) {
@@ -7160,6 +7912,7 @@ function clearBuffer(stream, state) {
 
       doWrite(stream, state, false, len, chunk, encoding, cb);
       entry = entry.next;
+      state.bufferedRequestCount--;
       // if we didn't call the onwrite immediately, then
       // it means that we need to wait until it does.
       // also, that means that the chunk and cb are currently
@@ -7172,7 +7925,6 @@ function clearBuffer(stream, state) {
     if (entry === null) state.lastBufferedRequest = null;
   }
 
-  state.bufferedRequestCount = 0;
   state.bufferedRequest = entry;
   state.bufferProcessing = false;
 }
@@ -7210,23 +7962,37 @@ Writable.prototype.end = function (chunk, encoding, cb) {
 function needFinish(state) {
   return state.ending && state.length === 0 && state.bufferedRequest === null && !state.finished && !state.writing;
 }
-
-function prefinish(stream, state) {
-  if (!state.prefinished) {
+function callFinal(stream, state) {
+  stream._final(function (err) {
+    state.pendingcb--;
+    if (err) {
+      stream.emit('error', err);
+    }
     state.prefinished = true;
     stream.emit('prefinish');
+    finishMaybe(stream, state);
+  });
+}
+function prefinish(stream, state) {
+  if (!state.prefinished && !state.finalCalled) {
+    if (typeof stream._final === 'function') {
+      state.pendingcb++;
+      state.finalCalled = true;
+      pna.nextTick(callFinal, stream, state);
+    } else {
+      state.prefinished = true;
+      stream.emit('prefinish');
+    }
   }
 }
 
 function finishMaybe(stream, state) {
   var need = needFinish(state);
   if (need) {
+    prefinish(stream, state);
     if (state.pendingcb === 0) {
-      prefinish(stream, state);
       state.finished = true;
       stream.emit('finish');
-    } else {
-      prefinish(stream, state);
     }
   }
   return need;
@@ -7236,132 +8002,593 @@ function endWritable(stream, state, cb) {
   state.ending = true;
   finishMaybe(stream, state);
   if (cb) {
-    if (state.finished) processNextTick(cb);else stream.once('finish', cb);
+    if (state.finished) pna.nextTick(cb);else stream.once('finish', cb);
   }
   state.ended = true;
   stream.writable = false;
 }
 
-// It seems a linked list but it is not
-// there will be only 2 of these for each stream
-function CorkedRequest(state) {
-  var _this = this;
-
-  this.next = null;
-  this.entry = null;
-
-  this.finish = function (err) {
-    var entry = _this.entry;
-    _this.entry = null;
-    while (entry) {
-      var cb = entry.callback;
-      state.pendingcb--;
-      cb(err);
-      entry = entry.next;
-    }
-    if (state.corkedRequestsFree) {
-      state.corkedRequestsFree.next = _this;
-    } else {
-      state.corkedRequestsFree = _this;
-    }
-  };
+function onCorkedFinish(corkReq, state, err) {
+  var entry = corkReq.entry;
+  corkReq.entry = null;
+  while (entry) {
+    var cb = entry.callback;
+    state.pendingcb--;
+    cb(err);
+    entry = entry.next;
+  }
+  if (state.corkedRequestsFree) {
+    state.corkedRequestsFree.next = corkReq;
+  } else {
+    state.corkedRequestsFree = corkReq;
+  }
 }
-}).call(this,require('_process'))
-},{"./_stream_duplex":23,"_process":21,"buffer":13,"buffer-shims":12,"core-util-is":14,"events":15,"inherits":17,"process-nextick-args":20,"util-deprecate":35}],28:[function(require,module,exports){
+
+Object.defineProperty(Writable.prototype, 'destroyed', {
+  get: function () {
+    if (this._writableState === undefined) {
+      return false;
+    }
+    return this._writableState.destroyed;
+  },
+  set: function (value) {
+    // we ignore the value if the stream
+    // has not been initialized yet
+    if (!this._writableState) {
+      return;
+    }
+
+    // backward compatibility, the user is explicitly
+    // managing destroyed
+    this._writableState.destroyed = value;
+  }
+});
+
+Writable.prototype.destroy = destroyImpl.destroy;
+Writable.prototype._undestroy = destroyImpl.undestroy;
+Writable.prototype._destroy = function (err, cb) {
+  this.end();
+  cb(err);
+};
+}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("timers").setImmediate)
+},{"./_stream_duplex":24,"./internal/streams/destroy":30,"./internal/streams/stream":31,"_process":22,"core-util-is":15,"inherits":18,"process-nextick-args":21,"safe-buffer":37,"timers":39,"util-deprecate":40}],29:[function(require,module,exports){
 'use strict';
 
-var Buffer = require('buffer').Buffer;
-/*<replacement>*/
-var bufferShim = require('buffer-shims');
-/*</replacement>*/
+function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
-module.exports = BufferList;
+var Buffer = require('safe-buffer').Buffer;
+var util = require('util');
 
-function BufferList() {
-  this.head = null;
-  this.tail = null;
-  this.length = 0;
+function copyBuffer(src, target, offset) {
+  src.copy(target, offset);
 }
 
-BufferList.prototype.push = function (v) {
-  var entry = { data: v, next: null };
-  if (this.length > 0) this.tail.next = entry;else this.head = entry;
-  this.tail = entry;
-  ++this.length;
-};
+module.exports = function () {
+  function BufferList() {
+    _classCallCheck(this, BufferList);
 
-BufferList.prototype.unshift = function (v) {
-  var entry = { data: v, next: this.head };
-  if (this.length === 0) this.tail = entry;
-  this.head = entry;
-  ++this.length;
-};
-
-BufferList.prototype.shift = function () {
-  if (this.length === 0) return;
-  var ret = this.head.data;
-  if (this.length === 1) this.head = this.tail = null;else this.head = this.head.next;
-  --this.length;
-  return ret;
-};
-
-BufferList.prototype.clear = function () {
-  this.head = this.tail = null;
-  this.length = 0;
-};
-
-BufferList.prototype.join = function (s) {
-  if (this.length === 0) return '';
-  var p = this.head;
-  var ret = '' + p.data;
-  while (p = p.next) {
-    ret += s + p.data;
-  }return ret;
-};
-
-BufferList.prototype.concat = function (n) {
-  if (this.length === 0) return bufferShim.alloc(0);
-  if (this.length === 1) return this.head.data;
-  var ret = bufferShim.allocUnsafe(n >>> 0);
-  var p = this.head;
-  var i = 0;
-  while (p) {
-    p.data.copy(ret, i);
-    i += p.data.length;
-    p = p.next;
+    this.head = null;
+    this.tail = null;
+    this.length = 0;
   }
-  return ret;
-};
-},{"buffer":13,"buffer-shims":12}],29:[function(require,module,exports){
-module.exports = require("./lib/_stream_passthrough.js")
 
-},{"./lib/_stream_passthrough.js":24}],30:[function(require,module,exports){
-(function (process){
-var Stream = (function (){
-  try {
-    return require('st' + 'ream'); // hack to fix a circular dependency issue when used with browserify
-  } catch(_){}
-}());
+  BufferList.prototype.push = function push(v) {
+    var entry = { data: v, next: null };
+    if (this.length > 0) this.tail.next = entry;else this.head = entry;
+    this.tail = entry;
+    ++this.length;
+  };
+
+  BufferList.prototype.unshift = function unshift(v) {
+    var entry = { data: v, next: this.head };
+    if (this.length === 0) this.tail = entry;
+    this.head = entry;
+    ++this.length;
+  };
+
+  BufferList.prototype.shift = function shift() {
+    if (this.length === 0) return;
+    var ret = this.head.data;
+    if (this.length === 1) this.head = this.tail = null;else this.head = this.head.next;
+    --this.length;
+    return ret;
+  };
+
+  BufferList.prototype.clear = function clear() {
+    this.head = this.tail = null;
+    this.length = 0;
+  };
+
+  BufferList.prototype.join = function join(s) {
+    if (this.length === 0) return '';
+    var p = this.head;
+    var ret = '' + p.data;
+    while (p = p.next) {
+      ret += s + p.data;
+    }return ret;
+  };
+
+  BufferList.prototype.concat = function concat(n) {
+    if (this.length === 0) return Buffer.alloc(0);
+    if (this.length === 1) return this.head.data;
+    var ret = Buffer.allocUnsafe(n >>> 0);
+    var p = this.head;
+    var i = 0;
+    while (p) {
+      copyBuffer(p.data, ret, i);
+      i += p.data.length;
+      p = p.next;
+    }
+    return ret;
+  };
+
+  return BufferList;
+}();
+
+if (util && util.inspect && util.inspect.custom) {
+  module.exports.prototype[util.inspect.custom] = function () {
+    var obj = util.inspect({ length: this.length });
+    return this.constructor.name + ' ' + obj;
+  };
+}
+},{"safe-buffer":37,"util":13}],30:[function(require,module,exports){
+'use strict';
+
+/*<replacement>*/
+
+var pna = require('process-nextick-args');
+/*</replacement>*/
+
+// undocumented cb() API, needed for core, not for public API
+function destroy(err, cb) {
+  var _this = this;
+
+  var readableDestroyed = this._readableState && this._readableState.destroyed;
+  var writableDestroyed = this._writableState && this._writableState.destroyed;
+
+  if (readableDestroyed || writableDestroyed) {
+    if (cb) {
+      cb(err);
+    } else if (err && (!this._writableState || !this._writableState.errorEmitted)) {
+      pna.nextTick(emitErrorNT, this, err);
+    }
+    return this;
+  }
+
+  // we set destroyed to true before firing error callbacks in order
+  // to make it re-entrance safe in case destroy() is called within callbacks
+
+  if (this._readableState) {
+    this._readableState.destroyed = true;
+  }
+
+  // if this is a duplex stream mark the writable part as destroyed as well
+  if (this._writableState) {
+    this._writableState.destroyed = true;
+  }
+
+  this._destroy(err || null, function (err) {
+    if (!cb && err) {
+      pna.nextTick(emitErrorNT, _this, err);
+      if (_this._writableState) {
+        _this._writableState.errorEmitted = true;
+      }
+    } else if (cb) {
+      cb(err);
+    }
+  });
+
+  return this;
+}
+
+function undestroy() {
+  if (this._readableState) {
+    this._readableState.destroyed = false;
+    this._readableState.reading = false;
+    this._readableState.ended = false;
+    this._readableState.endEmitted = false;
+  }
+
+  if (this._writableState) {
+    this._writableState.destroyed = false;
+    this._writableState.ended = false;
+    this._writableState.ending = false;
+    this._writableState.finished = false;
+    this._writableState.errorEmitted = false;
+  }
+}
+
+function emitErrorNT(self, err) {
+  self.emit('error', err);
+}
+
+module.exports = {
+  destroy: destroy,
+  undestroy: undestroy
+};
+},{"process-nextick-args":21}],31:[function(require,module,exports){
+module.exports = require('events').EventEmitter;
+
+},{"events":16}],32:[function(require,module,exports){
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+'use strict';
+
+/*<replacement>*/
+
+var Buffer = require('safe-buffer').Buffer;
+/*</replacement>*/
+
+var isEncoding = Buffer.isEncoding || function (encoding) {
+  encoding = '' + encoding;
+  switch (encoding && encoding.toLowerCase()) {
+    case 'hex':case 'utf8':case 'utf-8':case 'ascii':case 'binary':case 'base64':case 'ucs2':case 'ucs-2':case 'utf16le':case 'utf-16le':case 'raw':
+      return true;
+    default:
+      return false;
+  }
+};
+
+function _normalizeEncoding(enc) {
+  if (!enc) return 'utf8';
+  var retried;
+  while (true) {
+    switch (enc) {
+      case 'utf8':
+      case 'utf-8':
+        return 'utf8';
+      case 'ucs2':
+      case 'ucs-2':
+      case 'utf16le':
+      case 'utf-16le':
+        return 'utf16le';
+      case 'latin1':
+      case 'binary':
+        return 'latin1';
+      case 'base64':
+      case 'ascii':
+      case 'hex':
+        return enc;
+      default:
+        if (retried) return; // undefined
+        enc = ('' + enc).toLowerCase();
+        retried = true;
+    }
+  }
+};
+
+// Do not cache `Buffer.isEncoding` when checking encoding names as some
+// modules monkey-patch it to support additional encodings
+function normalizeEncoding(enc) {
+  var nenc = _normalizeEncoding(enc);
+  if (typeof nenc !== 'string' && (Buffer.isEncoding === isEncoding || !isEncoding(enc))) throw new Error('Unknown encoding: ' + enc);
+  return nenc || enc;
+}
+
+// StringDecoder provides an interface for efficiently splitting a series of
+// buffers into a series of JS strings without breaking apart multi-byte
+// characters.
+exports.StringDecoder = StringDecoder;
+function StringDecoder(encoding) {
+  this.encoding = normalizeEncoding(encoding);
+  var nb;
+  switch (this.encoding) {
+    case 'utf16le':
+      this.text = utf16Text;
+      this.end = utf16End;
+      nb = 4;
+      break;
+    case 'utf8':
+      this.fillLast = utf8FillLast;
+      nb = 4;
+      break;
+    case 'base64':
+      this.text = base64Text;
+      this.end = base64End;
+      nb = 3;
+      break;
+    default:
+      this.write = simpleWrite;
+      this.end = simpleEnd;
+      return;
+  }
+  this.lastNeed = 0;
+  this.lastTotal = 0;
+  this.lastChar = Buffer.allocUnsafe(nb);
+}
+
+StringDecoder.prototype.write = function (buf) {
+  if (buf.length === 0) return '';
+  var r;
+  var i;
+  if (this.lastNeed) {
+    r = this.fillLast(buf);
+    if (r === undefined) return '';
+    i = this.lastNeed;
+    this.lastNeed = 0;
+  } else {
+    i = 0;
+  }
+  if (i < buf.length) return r ? r + this.text(buf, i) : this.text(buf, i);
+  return r || '';
+};
+
+StringDecoder.prototype.end = utf8End;
+
+// Returns only complete characters in a Buffer
+StringDecoder.prototype.text = utf8Text;
+
+// Attempts to complete a partial non-UTF-8 character using bytes from a Buffer
+StringDecoder.prototype.fillLast = function (buf) {
+  if (this.lastNeed <= buf.length) {
+    buf.copy(this.lastChar, this.lastTotal - this.lastNeed, 0, this.lastNeed);
+    return this.lastChar.toString(this.encoding, 0, this.lastTotal);
+  }
+  buf.copy(this.lastChar, this.lastTotal - this.lastNeed, 0, buf.length);
+  this.lastNeed -= buf.length;
+};
+
+// Checks the type of a UTF-8 byte, whether it's ASCII, a leading byte, or a
+// continuation byte. If an invalid byte is detected, -2 is returned.
+function utf8CheckByte(byte) {
+  if (byte <= 0x7F) return 0;else if (byte >> 5 === 0x06) return 2;else if (byte >> 4 === 0x0E) return 3;else if (byte >> 3 === 0x1E) return 4;
+  return byte >> 6 === 0x02 ? -1 : -2;
+}
+
+// Checks at most 3 bytes at the end of a Buffer in order to detect an
+// incomplete multi-byte UTF-8 character. The total number of bytes (2, 3, or 4)
+// needed to complete the UTF-8 character (if applicable) are returned.
+function utf8CheckIncomplete(self, buf, i) {
+  var j = buf.length - 1;
+  if (j < i) return 0;
+  var nb = utf8CheckByte(buf[j]);
+  if (nb >= 0) {
+    if (nb > 0) self.lastNeed = nb - 1;
+    return nb;
+  }
+  if (--j < i || nb === -2) return 0;
+  nb = utf8CheckByte(buf[j]);
+  if (nb >= 0) {
+    if (nb > 0) self.lastNeed = nb - 2;
+    return nb;
+  }
+  if (--j < i || nb === -2) return 0;
+  nb = utf8CheckByte(buf[j]);
+  if (nb >= 0) {
+    if (nb > 0) {
+      if (nb === 2) nb = 0;else self.lastNeed = nb - 3;
+    }
+    return nb;
+  }
+  return 0;
+}
+
+// Validates as many continuation bytes for a multi-byte UTF-8 character as
+// needed or are available. If we see a non-continuation byte where we expect
+// one, we "replace" the validated continuation bytes we've seen so far with
+// a single UTF-8 replacement character ('\ufffd'), to match v8's UTF-8 decoding
+// behavior. The continuation byte check is included three times in the case
+// where all of the continuation bytes for a character exist in the same buffer.
+// It is also done this way as a slight performance increase instead of using a
+// loop.
+function utf8CheckExtraBytes(self, buf, p) {
+  if ((buf[0] & 0xC0) !== 0x80) {
+    self.lastNeed = 0;
+    return '\ufffd';
+  }
+  if (self.lastNeed > 1 && buf.length > 1) {
+    if ((buf[1] & 0xC0) !== 0x80) {
+      self.lastNeed = 1;
+      return '\ufffd';
+    }
+    if (self.lastNeed > 2 && buf.length > 2) {
+      if ((buf[2] & 0xC0) !== 0x80) {
+        self.lastNeed = 2;
+        return '\ufffd';
+      }
+    }
+  }
+}
+
+// Attempts to complete a multi-byte UTF-8 character using bytes from a Buffer.
+function utf8FillLast(buf) {
+  var p = this.lastTotal - this.lastNeed;
+  var r = utf8CheckExtraBytes(this, buf, p);
+  if (r !== undefined) return r;
+  if (this.lastNeed <= buf.length) {
+    buf.copy(this.lastChar, p, 0, this.lastNeed);
+    return this.lastChar.toString(this.encoding, 0, this.lastTotal);
+  }
+  buf.copy(this.lastChar, p, 0, buf.length);
+  this.lastNeed -= buf.length;
+}
+
+// Returns all complete UTF-8 characters in a Buffer. If the Buffer ended on a
+// partial character, the character's bytes are buffered until the required
+// number of bytes are available.
+function utf8Text(buf, i) {
+  var total = utf8CheckIncomplete(this, buf, i);
+  if (!this.lastNeed) return buf.toString('utf8', i);
+  this.lastTotal = total;
+  var end = buf.length - (total - this.lastNeed);
+  buf.copy(this.lastChar, 0, end);
+  return buf.toString('utf8', i, end);
+}
+
+// For UTF-8, a replacement character is added when ending on a partial
+// character.
+function utf8End(buf) {
+  var r = buf && buf.length ? this.write(buf) : '';
+  if (this.lastNeed) return r + '\ufffd';
+  return r;
+}
+
+// UTF-16LE typically needs two bytes per character, but even if we have an even
+// number of bytes available, we need to check if we end on a leading/high
+// surrogate. In that case, we need to wait for the next two bytes in order to
+// decode the last character properly.
+function utf16Text(buf, i) {
+  if ((buf.length - i) % 2 === 0) {
+    var r = buf.toString('utf16le', i);
+    if (r) {
+      var c = r.charCodeAt(r.length - 1);
+      if (c >= 0xD800 && c <= 0xDBFF) {
+        this.lastNeed = 2;
+        this.lastTotal = 4;
+        this.lastChar[0] = buf[buf.length - 2];
+        this.lastChar[1] = buf[buf.length - 1];
+        return r.slice(0, -1);
+      }
+    }
+    return r;
+  }
+  this.lastNeed = 1;
+  this.lastTotal = 2;
+  this.lastChar[0] = buf[buf.length - 1];
+  return buf.toString('utf16le', i, buf.length - 1);
+}
+
+// For UTF-16LE we do not explicitly append special replacement characters if we
+// end on a partial character, we simply let v8 handle that.
+function utf16End(buf) {
+  var r = buf && buf.length ? this.write(buf) : '';
+  if (this.lastNeed) {
+    var end = this.lastTotal - this.lastNeed;
+    return r + this.lastChar.toString('utf16le', 0, end);
+  }
+  return r;
+}
+
+function base64Text(buf, i) {
+  var n = (buf.length - i) % 3;
+  if (n === 0) return buf.toString('base64', i);
+  this.lastNeed = 3 - n;
+  this.lastTotal = 3;
+  if (n === 1) {
+    this.lastChar[0] = buf[buf.length - 1];
+  } else {
+    this.lastChar[0] = buf[buf.length - 2];
+    this.lastChar[1] = buf[buf.length - 1];
+  }
+  return buf.toString('base64', i, buf.length - n);
+}
+
+function base64End(buf) {
+  var r = buf && buf.length ? this.write(buf) : '';
+  if (this.lastNeed) return r + this.lastChar.toString('base64', 0, 3 - this.lastNeed);
+  return r;
+}
+
+// Pass bytes on through for single-byte encodings (e.g. ascii, latin1, hex)
+function simpleWrite(buf) {
+  return buf.toString(this.encoding);
+}
+
+function simpleEnd(buf) {
+  return buf && buf.length ? this.write(buf) : '';
+}
+},{"safe-buffer":37}],33:[function(require,module,exports){
+module.exports = require('./readable').PassThrough
+
+},{"./readable":34}],34:[function(require,module,exports){
 exports = module.exports = require('./lib/_stream_readable.js');
-exports.Stream = Stream || exports;
+exports.Stream = exports;
 exports.Readable = exports;
 exports.Writable = require('./lib/_stream_writable.js');
 exports.Duplex = require('./lib/_stream_duplex.js');
 exports.Transform = require('./lib/_stream_transform.js');
 exports.PassThrough = require('./lib/_stream_passthrough.js');
 
-if (!process.browser && process.env.READABLE_STREAM === 'disable' && Stream) {
-  module.exports = Stream;
+},{"./lib/_stream_duplex.js":24,"./lib/_stream_passthrough.js":25,"./lib/_stream_readable.js":26,"./lib/_stream_transform.js":27,"./lib/_stream_writable.js":28}],35:[function(require,module,exports){
+module.exports = require('./readable').Transform
+
+},{"./readable":34}],36:[function(require,module,exports){
+module.exports = require('./lib/_stream_writable.js');
+
+},{"./lib/_stream_writable.js":28}],37:[function(require,module,exports){
+/* eslint-disable node/no-deprecated-api */
+var buffer = require('buffer')
+var Buffer = buffer.Buffer
+
+// alternative to using Object.keys for old browsers
+function copyProps (src, dst) {
+  for (var key in src) {
+    dst[key] = src[key]
+  }
+}
+if (Buffer.from && Buffer.alloc && Buffer.allocUnsafe && Buffer.allocUnsafeSlow) {
+  module.exports = buffer
+} else {
+  // Copy properties from require('buffer')
+  copyProps(buffer, exports)
+  exports.Buffer = SafeBuffer
 }
 
-}).call(this,require('_process'))
-},{"./lib/_stream_duplex.js":23,"./lib/_stream_passthrough.js":24,"./lib/_stream_readable.js":25,"./lib/_stream_transform.js":26,"./lib/_stream_writable.js":27,"_process":21}],31:[function(require,module,exports){
-module.exports = require("./lib/_stream_transform.js")
+function SafeBuffer (arg, encodingOrOffset, length) {
+  return Buffer(arg, encodingOrOffset, length)
+}
 
-},{"./lib/_stream_transform.js":26}],32:[function(require,module,exports){
-module.exports = require("./lib/_stream_writable.js")
+// Copy static methods from Buffer
+copyProps(Buffer, SafeBuffer)
 
-},{"./lib/_stream_writable.js":27}],33:[function(require,module,exports){
+SafeBuffer.from = function (arg, encodingOrOffset, length) {
+  if (typeof arg === 'number') {
+    throw new TypeError('Argument must not be a number')
+  }
+  return Buffer(arg, encodingOrOffset, length)
+}
+
+SafeBuffer.alloc = function (size, fill, encoding) {
+  if (typeof size !== 'number') {
+    throw new TypeError('Argument must be a number')
+  }
+  var buf = Buffer(size)
+  if (fill !== undefined) {
+    if (typeof encoding === 'string') {
+      buf.fill(fill, encoding)
+    } else {
+      buf.fill(fill)
+    }
+  } else {
+    buf.fill(0)
+  }
+  return buf
+}
+
+SafeBuffer.allocUnsafe = function (size) {
+  if (typeof size !== 'number') {
+    throw new TypeError('Argument must be a number')
+  }
+  return Buffer(size)
+}
+
+SafeBuffer.allocUnsafeSlow = function (size) {
+  if (typeof size !== 'number') {
+    throw new TypeError('Argument must be a number')
+  }
+  return buffer.SlowBuffer(size)
+}
+
+},{"buffer":14}],38:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -7490,230 +8717,86 @@ Stream.prototype.pipe = function(dest, options) {
   return dest;
 };
 
-},{"events":15,"inherits":17,"readable-stream/duplex.js":22,"readable-stream/passthrough.js":29,"readable-stream/readable.js":30,"readable-stream/transform.js":31,"readable-stream/writable.js":32}],34:[function(require,module,exports){
-// Copyright Joyent, Inc. and other Node contributors.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a
-// copy of this software and associated documentation files (the
-// "Software"), to deal in the Software without restriction, including
-// without limitation the rights to use, copy, modify, merge, publish,
-// distribute, sublicense, and/or sell copies of the Software, and to permit
-// persons to whom the Software is furnished to do so, subject to the
-// following conditions:
-//
-// The above copyright notice and this permission notice shall be included
-// in all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
-// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
-// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
-// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
-// USE OR OTHER DEALINGS IN THE SOFTWARE.
+},{"events":16,"inherits":18,"readable-stream/duplex.js":23,"readable-stream/passthrough.js":33,"readable-stream/readable.js":34,"readable-stream/transform.js":35,"readable-stream/writable.js":36}],39:[function(require,module,exports){
+(function (setImmediate,clearImmediate){
+var nextTick = require('process/browser.js').nextTick;
+var apply = Function.prototype.apply;
+var slice = Array.prototype.slice;
+var immediateIds = {};
+var nextImmediateId = 0;
 
-var Buffer = require('buffer').Buffer;
+// DOM APIs, for completeness
 
-var isBufferEncoding = Buffer.isEncoding
-  || function(encoding) {
-       switch (encoding && encoding.toLowerCase()) {
-         case 'hex': case 'utf8': case 'utf-8': case 'ascii': case 'binary': case 'base64': case 'ucs2': case 'ucs-2': case 'utf16le': case 'utf-16le': case 'raw': return true;
-         default: return false;
-       }
-     }
+exports.setTimeout = function() {
+  return new Timeout(apply.call(setTimeout, window, arguments), clearTimeout);
+};
+exports.setInterval = function() {
+  return new Timeout(apply.call(setInterval, window, arguments), clearInterval);
+};
+exports.clearTimeout =
+exports.clearInterval = function(timeout) { timeout.close(); };
 
-
-function assertEncoding(encoding) {
-  if (encoding && !isBufferEncoding(encoding)) {
-    throw new Error('Unknown encoding: ' + encoding);
-  }
+function Timeout(id, clearFn) {
+  this._id = id;
+  this._clearFn = clearFn;
 }
-
-// StringDecoder provides an interface for efficiently splitting a series of
-// buffers into a series of JS strings without breaking apart multi-byte
-// characters. CESU-8 is handled as part of the UTF-8 encoding.
-//
-// @TODO Handling all encodings inside a single object makes it very difficult
-// to reason about this code, so it should be split up in the future.
-// @TODO There should be a utf8-strict encoding that rejects invalid UTF-8 code
-// points as used by CESU-8.
-var StringDecoder = exports.StringDecoder = function(encoding) {
-  this.encoding = (encoding || 'utf8').toLowerCase().replace(/[-_]/, '');
-  assertEncoding(encoding);
-  switch (this.encoding) {
-    case 'utf8':
-      // CESU-8 represents each of Surrogate Pair by 3-bytes
-      this.surrogateSize = 3;
-      break;
-    case 'ucs2':
-    case 'utf16le':
-      // UTF-16 represents each of Surrogate Pair by 2-bytes
-      this.surrogateSize = 2;
-      this.detectIncompleteChar = utf16DetectIncompleteChar;
-      break;
-    case 'base64':
-      // Base-64 stores 3 bytes in 4 chars, and pads the remainder.
-      this.surrogateSize = 3;
-      this.detectIncompleteChar = base64DetectIncompleteChar;
-      break;
-    default:
-      this.write = passThroughWrite;
-      return;
-  }
-
-  // Enough space to store all bytes of a single character. UTF-8 needs 4
-  // bytes, but CESU-8 may require up to 6 (3 bytes per surrogate).
-  this.charBuffer = new Buffer(6);
-  // Number of bytes received for the current incomplete multi-byte character.
-  this.charReceived = 0;
-  // Number of bytes expected for the current incomplete multi-byte character.
-  this.charLength = 0;
+Timeout.prototype.unref = Timeout.prototype.ref = function() {};
+Timeout.prototype.close = function() {
+  this._clearFn.call(window, this._id);
 };
 
-
-// write decodes the given buffer and returns it as JS string that is
-// guaranteed to not contain any partial multi-byte characters. Any partial
-// character found at the end of the buffer is buffered up, and will be
-// returned when calling write again with the remaining bytes.
-//
-// Note: Converting a Buffer containing an orphan surrogate to a String
-// currently works, but converting a String to a Buffer (via `new Buffer`, or
-// Buffer#write) will replace incomplete surrogates with the unicode
-// replacement character. See https://codereview.chromium.org/121173009/ .
-StringDecoder.prototype.write = function(buffer) {
-  var charStr = '';
-  // if our last write ended with an incomplete multibyte character
-  while (this.charLength) {
-    // determine how many remaining bytes this buffer has to offer for this char
-    var available = (buffer.length >= this.charLength - this.charReceived) ?
-        this.charLength - this.charReceived :
-        buffer.length;
-
-    // add the new bytes to the char buffer
-    buffer.copy(this.charBuffer, this.charReceived, 0, available);
-    this.charReceived += available;
-
-    if (this.charReceived < this.charLength) {
-      // still not enough chars in this buffer? wait for more ...
-      return '';
-    }
-
-    // remove bytes belonging to the current character from the buffer
-    buffer = buffer.slice(available, buffer.length);
-
-    // get the character that was split
-    charStr = this.charBuffer.slice(0, this.charLength).toString(this.encoding);
-
-    // CESU-8: lead surrogate (D800-DBFF) is also the incomplete character
-    var charCode = charStr.charCodeAt(charStr.length - 1);
-    if (charCode >= 0xD800 && charCode <= 0xDBFF) {
-      this.charLength += this.surrogateSize;
-      charStr = '';
-      continue;
-    }
-    this.charReceived = this.charLength = 0;
-
-    // if there are no more bytes in this buffer, just emit our char
-    if (buffer.length === 0) {
-      return charStr;
-    }
-    break;
-  }
-
-  // determine and set charLength / charReceived
-  this.detectIncompleteChar(buffer);
-
-  var end = buffer.length;
-  if (this.charLength) {
-    // buffer the incomplete character bytes we got
-    buffer.copy(this.charBuffer, 0, buffer.length - this.charReceived, end);
-    end -= this.charReceived;
-  }
-
-  charStr += buffer.toString(this.encoding, 0, end);
-
-  var end = charStr.length - 1;
-  var charCode = charStr.charCodeAt(end);
-  // CESU-8: lead surrogate (D800-DBFF) is also the incomplete character
-  if (charCode >= 0xD800 && charCode <= 0xDBFF) {
-    var size = this.surrogateSize;
-    this.charLength += size;
-    this.charReceived += size;
-    this.charBuffer.copy(this.charBuffer, size, 0, size);
-    buffer.copy(this.charBuffer, 0, 0, size);
-    return charStr.substring(0, end);
-  }
-
-  // or just emit the charStr
-  return charStr;
+// Does not start the time, just sets up the members needed.
+exports.enroll = function(item, msecs) {
+  clearTimeout(item._idleTimeoutId);
+  item._idleTimeout = msecs;
 };
 
-// detectIncompleteChar determines if there is an incomplete UTF-8 character at
-// the end of the given buffer. If so, it sets this.charLength to the byte
-// length that character, and sets this.charReceived to the number of bytes
-// that are available for this character.
-StringDecoder.prototype.detectIncompleteChar = function(buffer) {
-  // determine how many bytes we have to check at the end of this buffer
-  var i = (buffer.length >= 3) ? 3 : buffer.length;
-
-  // Figure out if one of the last i bytes of our buffer announces an
-  // incomplete char.
-  for (; i > 0; i--) {
-    var c = buffer[buffer.length - i];
-
-    // See http://en.wikipedia.org/wiki/UTF-8#Description
-
-    // 110XXXXX
-    if (i == 1 && c >> 5 == 0x06) {
-      this.charLength = 2;
-      break;
-    }
-
-    // 1110XXXX
-    if (i <= 2 && c >> 4 == 0x0E) {
-      this.charLength = 3;
-      break;
-    }
-
-    // 11110XXX
-    if (i <= 3 && c >> 3 == 0x1E) {
-      this.charLength = 4;
-      break;
-    }
-  }
-  this.charReceived = i;
+exports.unenroll = function(item) {
+  clearTimeout(item._idleTimeoutId);
+  item._idleTimeout = -1;
 };
 
-StringDecoder.prototype.end = function(buffer) {
-  var res = '';
-  if (buffer && buffer.length)
-    res = this.write(buffer);
+exports._unrefActive = exports.active = function(item) {
+  clearTimeout(item._idleTimeoutId);
 
-  if (this.charReceived) {
-    var cr = this.charReceived;
-    var buf = this.charBuffer;
-    var enc = this.encoding;
-    res += buf.slice(0, cr).toString(enc);
+  var msecs = item._idleTimeout;
+  if (msecs >= 0) {
+    item._idleTimeoutId = setTimeout(function onTimeout() {
+      if (item._onTimeout)
+        item._onTimeout();
+    }, msecs);
   }
-
-  return res;
 };
 
-function passThroughWrite(buffer) {
-  return buffer.toString(this.encoding);
-}
+// That's not how node.js implements it but the exposed api is the same.
+exports.setImmediate = typeof setImmediate === "function" ? setImmediate : function(fn) {
+  var id = nextImmediateId++;
+  var args = arguments.length < 2 ? false : slice.call(arguments, 1);
 
-function utf16DetectIncompleteChar(buffer) {
-  this.charReceived = buffer.length % 2;
-  this.charLength = this.charReceived ? 2 : 0;
-}
+  immediateIds[id] = true;
 
-function base64DetectIncompleteChar(buffer) {
-  this.charReceived = buffer.length % 3;
-  this.charLength = this.charReceived ? 3 : 0;
-}
+  nextTick(function onNextTick() {
+    if (immediateIds[id]) {
+      // fn.call() is faster so we optimize for the common use-case
+      // @see http://jsperf.com/call-apply-segu
+      if (args) {
+        fn.apply(null, args);
+      } else {
+        fn.call(null);
+      }
+      // Prevent ids from leaking
+      exports.clearImmediate(id);
+    }
+  });
 
-},{"buffer":13}],35:[function(require,module,exports){
+  return id;
+};
+
+exports.clearImmediate = typeof clearImmediate === "function" ? clearImmediate : function(id) {
+  delete immediateIds[id];
+};
+}).call(this,require("timers").setImmediate,require("timers").clearImmediate)
+},{"process/browser.js":22,"timers":39}],40:[function(require,module,exports){
 (function (global){
 
 /**
@@ -7784,16 +8867,14 @@ function config (name) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],36:[function(require,module,exports){
-arguments[4][17][0].apply(exports,arguments)
-},{"dup":17}],37:[function(require,module,exports){
+},{}],41:[function(require,module,exports){
 module.exports = function isBuffer(arg) {
   return arg && typeof arg === 'object'
     && typeof arg.copy === 'function'
     && typeof arg.fill === 'function'
     && typeof arg.readUInt8 === 'function';
 }
-},{}],38:[function(require,module,exports){
+},{}],42:[function(require,module,exports){
 (function (process,global){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -8383,4 +9464,4 @@ function hasOwnProperty(obj, prop) {
 }
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./support/isBuffer":37,"_process":21,"inherits":36}]},{},[1]);
+},{"./support/isBuffer":41,"_process":22,"inherits":18}]},{},[1]);

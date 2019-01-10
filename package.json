@@ -9,13 +9,17 @@
   "dependencies": {
     "n3": "1.0.0-beta.1"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "browserify": "^16.2.3",
+    "local-web-server": "^2.6.1"
+  },
   "engines": {
     "node": ">=4.0"
   },
   "scripts": {
     "build": "browserify lib/validator.js -o public/js/ttl.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "npm install && npm build && ws"
   },
   "repository": {
     "type": "git",

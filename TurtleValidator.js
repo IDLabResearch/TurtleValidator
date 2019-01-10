@@ -45,6 +45,7 @@ function validateArgument(arg) {
       validate(res, showValidation);
     }).on('error', function (e) {
       console.log("Got error: " + e.message);
+      process.exit(1);
     });
     break;
   case null:
@@ -52,6 +53,7 @@ function validateArgument(arg) {
     break;
   default:
     console.log('Cannot access %s: "%s" not supported', parsedUrl.href, parsedUrl.protocol)
+    process.exit(1);
   }
 }
 
@@ -64,4 +66,5 @@ function showValidation(feedback) {
     console.log('WARNING: ' + warning);
   });
   console.log("Validator finished with " + feedback.warnings.length + " warnings and " + feedback.errors.length + " errors.");
+  process.exit(feedback.errors.length > 0 ? 2 : 0);
 }

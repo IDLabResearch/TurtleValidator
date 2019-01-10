@@ -18,8 +18,17 @@ Examples:
 ## Or install the browser client
 
 ```bash
+# Equivalent to: npm build
 npm install
 browserify lib/validator.js -o public/js/ttl.js
 ```
 
 Then use it in your browser using the index.html in the public folder.
+You can run this locally as follows.
+
+```bash
+# Equivalent to: npm start
+npm install
+browserify lib/validator.js -o public/js/ttl.js
+ws
+```
