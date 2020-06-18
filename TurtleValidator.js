@@ -49,7 +49,7 @@ function validateArgument(arg) {
     });
     break;
   case null:
-    validate(fs.createReadStream(parsedUrl.href), showValidation);
+    validate(fs.createReadStream(arg), showValidation);
     break;
   default:
     console.log('Cannot access %s: "%s" not supported', parsedUrl.href, parsedUrl.protocol)
